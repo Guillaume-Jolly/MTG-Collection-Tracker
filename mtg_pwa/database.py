@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable
 
+from .local_cache import local_image_url
 from .prices import PricePoint, current_eur_price, decimal_to_json, extract_eur_prices
 
 
@@ -27,9 +28,12 @@ def utc_now() -> str:
 def connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA synchronous = NORMAL")
     return conn
 
 
@@ -398,6 +402,7 @@ def card_summary(conn: sqlite3.Connection, card: dict[str, Any], finish: str = "
     if available_finishes and finish not in available_finishes:
         display_finish = available_finishes[0]
     price = display_price_for(conn, card, display_finish)
+    cached_image = local_image_url(card["id"])
     return {
         "id": card["id"],
         "oracle_id": card.get("oracle_id"),
@@ -410,8 +415,8 @@ def card_summary(conn: sqlite3.Connection, card: dict[str, Any], finish: str = "
         "rarity": card.get("rarity"),
         "finishes": card.get("finishes") or [],
         "display_finish": display_finish,
-        "image_url": image_url_for(card),
-        "image_large_url": large_image_url_for(card),
+        "image_url": cached_image or image_url_for(card),
+        "image_large_url": cached_image or large_image_url_for(card),
         "scryfall_uri": card.get("scryfall_uri"),
         "price": price_to_json(price),
     }
@@ -499,6 +504,89 @@ def delete_collection_item(conn: sqlite3.Connection, item_id: int) -> bool:
     cursor = conn.execute("DELETE FROM collection_items WHERE id = ?", (item_id,))
     conn.commit()
     return cursor.rowcount > 0
+
+
+def adjust_collection_quantity(
+    conn: sqlite3.Connection,
+    *,
+    scryfall_id: str,
+    finish: str,
+    delta: int,
+) -> dict[str, Any]:
+    if delta == 0:
+        raise ValueError("delta doit etre different de zero.")
+
+    row = conn.execute(
+        """
+        SELECT id, quantity
+        FROM collection_items
+        WHERE scryfall_id = ? AND finish = ?
+        """,
+        (scryfall_id, finish),
+    ).fetchone()
+
+    if delta > 0:
+        if row is None:
+            item_id = add_collection_item(
+                conn,
+                scryfall_id=scryfall_id,
+                quantity=delta,
+                finish=finish,
+                condition="near_mint",
+                language=None,
+                purchase_price=None,
+                purchase_currency="EUR",
+                purchase_date=None,
+                notes=None,
+            )
+            return {"item_id": item_id, "quantity": delta, "deleted": False}
+
+        quantity = int(row["quantity"]) + delta
+        update_collection_item(conn, int(row["id"]), {"quantity": quantity})
+        return {"item_id": int(row["id"]), "quantity": quantity, "deleted": False}
+
+    if row is None:
+        return {"item_id": None, "quantity": 0, "deleted": False}
+
+    quantity = int(row["quantity"]) + delta
+    item_id = int(row["id"])
+    if quantity <= 0:
+        delete_collection_item(conn, item_id)
+        return {"item_id": item_id, "quantity": 0, "deleted": True}
+
+    update_collection_item(conn, item_id, {"quantity": quantity})
+    return {"item_id": item_id, "quantity": quantity, "deleted": False}
+
+
+def collection_summary(conn: sqlite3.Connection) -> dict[str, Any]:
+    rows = conn.execute(
+        """
+        SELECT ci.quantity, ci.finish, c.raw_json
+        FROM collection_items ci
+        JOIN cards c ON c.scryfall_id = ci.scryfall_id
+        """
+    ).fetchall()
+
+    total_cards = 0
+    estimated_value = Decimal("0")
+    unique_cards: set[str] = set()
+
+    for row in rows:
+        card = json.loads(row["raw_json"])
+        quantity = int(row["quantity"])
+        price = display_price_for(conn, card, row["finish"])
+        if price is not None:
+            estimated_value += price.price * quantity
+        total_cards += quantity
+        unique_cards.add(card["id"])
+
+    return {
+        "summary": {
+            "total_cards": total_cards,
+            "unique_cards": len(unique_cards),
+            "estimated_value_eur": decimal_to_json(estimated_value),
+        }
+    }
 
 
 def list_collection(conn: sqlite3.Connection) -> dict[str, Any]:

@@ -1,9 +1,30 @@
 const eur = new Intl.NumberFormat("fr-FR", { style: "currency", currency: "EUR" });
 
+const DECKS_PAGE_SIZE = 20;
+
 const state = {
   collection: null,
   currentTab: "search",
   previousTab: "search",
+  decks: {
+    page: 1,
+    total: 0,
+    totalPages: 1,
+    loading: false,
+    searchTimer: null,
+  },
+  collectionBrowse: {
+    level: "blocks",
+    setCode: null,
+    setName: null,
+    sectionCode: null,
+    sectionLabel: null,
+    sortPrimary: "price_desc",
+    sortSecondary: "",
+    multiSort: false,
+    cardsTotal: 0,
+    cardSize: 110,
+  },
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -53,6 +74,15 @@ function switchTab(tab) {
     screen.classList.toggle("active", screen.id === `screen-${tab}`);
   });
   state.currentTab = tab;
+  document.body.classList.toggle("collection-full-width", tab === "collection");
+  if (tab === "decks") {
+    loadDeckExtensions()
+      .then(() => loadDecks(state.decks.page))
+      .catch((error) => toast(error.message));
+  }
+  if (tab === "collection") {
+    showCollectionLevel(state.collectionBrowse.level).catch((error) => toast(error.message));
+  }
 }
 
 function openCardScreen() {
@@ -87,6 +117,14 @@ function detailImage(card) {
     return `<div class="detail-card-image"></div>`;
   }
   return `<img class="detail-card-image" src="${source}" alt="${escapeHtml(card.printed_name || card.name)}" loading="lazy" />`;
+}
+
+function deckPreviewImage(card) {
+  const source = card.image_large_url || card.image_url;
+  if (!source) {
+    return `<div class="deck-preview-card-image"></div>`;
+  }
+  return `<img class="deck-preview-card-image" src="${source}" alt="${escapeHtml(card.printed_name || card.name)}" loading="lazy" />`;
 }
 
 function renderSearchResults(cards) {
@@ -150,14 +188,13 @@ async function addCard(scryfallId, finish, button) {
 }
 
 async function loadCollection() {
-  const collection = await api("/api/collection");
+  const collection = await api("/api/collection/summary");
   state.collection = collection;
   renderCollection(collection);
 }
 
 function renderDeckResults(decks) {
   const node = $("#deckResults");
-  $("#deckPreview").innerHTML = "";
   if (!decks.length) {
     node.innerHTML = `<div class="panel"><p class="muted">Aucun deck trouve.</p></div>`;
     return;
@@ -169,6 +206,136 @@ function renderDeckResults(decks) {
   node.querySelectorAll("[data-import-deck]").forEach((button) => {
     button.addEventListener("click", () => importDeck(button.dataset.fileName, button));
   });
+}
+
+function renderDeckListMeta(meta) {
+  const node = $("#deckListMeta");
+  if (!meta.total) {
+    node.textContent = "";
+    return;
+  }
+  const start = (meta.page - 1) * meta.page_size + 1;
+  const end = Math.min(meta.page * meta.page_size, meta.total);
+  node.textContent = `${start}-${end} sur ${meta.total} deck(s)`;
+}
+
+function renderDeckPagination(meta) {
+  const node = $("#deckPagination");
+  if (!meta || meta.total_pages <= 1) {
+    node.innerHTML = "";
+    return;
+  }
+
+  const pages = paginationPages(meta.page, meta.total_pages);
+  node.innerHTML = `
+    <button class="secondary page-btn" data-page="${meta.page - 1}" ${meta.page <= 1 ? "disabled" : ""} aria-label="Page precedente">&#8249;</button>
+    ${pages
+      .map((entry) =>
+        entry === "..."
+          ? `<span class="page-ellipsis">...</span>`
+          : `<button class="secondary page-btn ${entry === meta.page ? "active" : ""}" data-page="${entry}" ${entry === meta.page ? 'aria-current="page"' : ""}>${entry}</button>`,
+      )
+      .join("")}
+    <button class="secondary page-btn" data-page="${meta.page + 1}" ${meta.page >= meta.total_pages ? "disabled" : ""} aria-label="Page suivante">&#8250;</button>
+  `;
+
+  node.querySelectorAll("[data-page]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const page = Number(button.dataset.page);
+      if (!Number.isNaN(page)) {
+        loadDecks(page).catch((error) => toast(error.message));
+      }
+    });
+  });
+}
+
+function paginationPages(current, total) {
+  if (total <= 7) {
+    return Array.from({ length: total }, (_, index) => index + 1);
+  }
+  const pages = new Set([1, total, current, current - 1, current + 1]);
+  const ordered = [...pages].filter((page) => page >= 1 && page <= total).sort((a, b) => a - b);
+  const result = [];
+  for (let index = 0; index < ordered.length; index += 1) {
+    if (index > 0 && ordered[index] - ordered[index - 1] > 1) {
+      result.push("...");
+    }
+    result.push(ordered[index]);
+  }
+  return result;
+}
+
+function deckFilterParams() {
+  return new URLSearchParams({
+    commander_only: $("#commanderOnlyInput").checked ? "true" : "false",
+    hide_collector: $("#hideCollectorInput").checked ? "true" : "false",
+  });
+}
+
+function deckSearchParams(page = 1) {
+  return new URLSearchParams({
+    q: $("#deckSearchInput").value.trim(),
+    page: String(page),
+    page_size: String(DECKS_PAGE_SIZE),
+    commander_only: $("#commanderOnlyInput").checked ? "true" : "false",
+    hide_collector: $("#hideCollectorInput").checked ? "true" : "false",
+    extension: $("#deckExtensionInput").value,
+    sort: $("#deckSortInput").value,
+  });
+}
+
+async function loadDeckExtensions() {
+  const select = $("#deckExtensionInput");
+  const previous = select.value;
+  const payload = await api(`/api/decks/extensions?${deckFilterParams().toString()}`);
+  const extensions = payload.extensions || [];
+  select.innerHTML = `<option value="">Toutes les extensions</option>${extensions
+    .map((entry) => {
+      const code = entry.code || entry;
+      const name = entry.name || code;
+      const label = name !== code ? `${name} (${code})` : code;
+      return `<option value="${escapeHtml(code)}">${escapeHtml(label)}</option>`;
+    })
+    .join("")}`;
+  if (previous && extensions.some((entry) => (entry.code || entry) === previous)) {
+    select.value = previous;
+  }
+}
+
+async function loadDecks(page = 1) {
+  if (state.decks.loading) {
+    return;
+  }
+  state.decks.loading = true;
+  state.decks.page = page;
+  const node = $("#deckResults");
+  node.innerHTML = `<div class="panel"><p class="muted">Chargement des decks...</p></div>`;
+
+  try {
+    const payload = await api(`/api/decks/search?${deckSearchParams(page).toString()}`);
+    state.decks.total = payload.total || 0;
+    state.decks.totalPages = payload.total_pages || 1;
+    renderDeckListMeta(payload);
+    renderDeckResults(payload.decks || []);
+    renderDeckPagination(payload);
+    if (page > 1) {
+      $("#deckResults").scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  } finally {
+    state.decks.loading = false;
+  }
+}
+
+function scheduleDeckReload() {
+  window.clearTimeout(state.decks.searchTimer);
+  state.decks.searchTimer = window.setTimeout(() => {
+    loadDecks(1).catch((error) => toast(error.message));
+  }, 300);
+}
+
+function toggleDeckPanel(button, panel) {
+  const open = panel.classList.toggle("hidden") === false;
+  button.setAttribute("aria-expanded", open ? "true" : "false");
 }
 
 function renderDeckCard(deck) {
@@ -201,6 +368,7 @@ function renderDeckMenuPrice(priceEstimate) {
 async function showDeckDetail(fileName, button) {
   try {
     setLoading(button, true, "Chargement...");
+    $("#deckPreview").innerHTML = "";
     const payload = await api(`/api/decks/detail?file_name=${encodeURIComponent(fileName)}`);
     renderDeckPreview(payload);
   } catch (error) {
@@ -219,7 +387,7 @@ function renderDeckPreview(payload) {
   $("#deckPreview").innerHTML = `
     <section class="panel deck-preview">
       <div class="deck-preview-hero">
-        ${commander ? cardImage(commander) : `<div class="card-image"></div>`}
+        ${commander ? deckPreviewImage(commander) : `<div class="deck-preview-card-image"></div>`}
         <div>
           <p class="eyebrow">Previsualisation</p>
           <h2>${escapeHtml(deck.name)}</h2>
@@ -402,26 +570,531 @@ function renderPreloadStatus(status) {
 function renderCollection(collection) {
   const summary = collection.summary || {};
   $("#headerTotal").textContent = money(summary.estimated_value_eur || 0);
-  $("#summaryValue").textContent = money(summary.estimated_value_eur || 0);
-  $("#summaryCards").textContent = summary.total_cards || 0;
-  $("#summaryUnique").textContent = summary.unique_cards || 0;
+  state.collection = collection;
+}
 
-  const node = $("#collectionList");
-  const items = collection.items || [];
-  if (!items.length) {
-    node.innerHTML = `<div class="panel"><p class="muted">Collection vide. Cherche une carte puis ajoute-la.</p></div>`;
+function formatSetStats(entry) {
+  const owned = entry.owned_cards || 0;
+  const total = entry.total_cards || 0;
+  const ownedValue = money(entry.owned_value_eur || 0);
+  const totalValue = entry.total_value_eur != null ? money(entry.total_value_eur) : "—";
+  return `${owned} / ${total} cartes - ${ownedValue} / ${totalValue}`;
+}
+
+async function loadCollectionBlocks() {
+  $("#collectionBlocksView").innerHTML = `<div class="panel"><p class="muted">Chargement des blocs...</p></div>`;
+  const payload = await api("/api/collection/blocks");
+  renderCollectionBlocks(payload.categories || []);
+}
+
+function renderCollectionBlocks(categories) {
+  const node = $("#collectionBlocksView");
+  node.innerHTML = categories
+    .map(
+      (category) => `
+      <section class="block-category">
+        <button class="block-category-header" type="button" data-toggle-category="${escapeHtml(category.id)}">
+          <span>${escapeHtml(category.label)}</span>
+          <span class="block-count">${category.count}</span>
+        </button>
+        <div class="block-grid" id="category-${escapeHtml(category.id)}">
+          ${category.sets.map(renderBlockTile).join("")}
+        </div>
+      </section>
+    `,
+    )
+    .join("");
+
+  node.querySelectorAll("[data-open-set]").forEach((button) => {
+    button.addEventListener("click", () => openCollectionSet(button.dataset.setCode, button.dataset.setName));
+  });
+  node.querySelectorAll("[data-toggle-category]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const target = $(`#category-${button.dataset.toggleCategory}`);
+      target.classList.toggle("collapsed");
+    });
+  });
+}
+
+function renderBlockTile(entry) {
+  const ownedClass = entry.owned_cards ? "block-tile owned" : "block-tile";
+  return `
+    <button class="${ownedClass}" type="button" data-open-set data-set-code="${escapeHtml(entry.code)}" data-set-name="${escapeHtml(entry.name)}">
+      <span class="block-tile-code">${escapeHtml(entry.code)}</span>
+      <strong>${escapeHtml(entry.name)}</strong>
+      <span class="block-tile-meta">${formatSetStats(entry)}</span>
+    </button>
+  `;
+}
+
+async function openCollectionSet(setCode, setName) {
+  state.collectionBrowse.level = "set";
+  state.collectionBrowse.setCode = setCode;
+  state.collectionBrowse.setName = setName;
+  state.collectionBrowse.sectionCode = null;
+  state.collectionBrowse.sectionLabel = null;
+  await showCollectionLevel("set");
+}
+
+async function openCollectionSection(sectionCode, sectionLabel) {
+  state.collectionBrowse.level = "cards";
+  state.collectionBrowse.sectionCode = sectionCode;
+  state.collectionBrowse.sectionLabel = sectionLabel;
+  await showCollectionLevel("cards");
+}
+
+async function showCollectionLevel(level) {
+  state.collectionBrowse.level = level;
+  hideCollectionPriceProgress();
+  $("#collectionBlocksView").classList.toggle("hidden", level !== "blocks");
+  $("#collectionSetView").classList.toggle("hidden", level !== "set");
+  $("#collectionCardsView").classList.toggle("hidden", level !== "cards");
+  $("#collectionNav").classList.toggle("hidden", level === "blocks");
+
+  if (level === "blocks") {
+    $("#collectionNavTitle").textContent = "Blocs";
+    $("#collectionNavEyebrow").textContent = "Collection";
+    await loadCollectionBlocks();
     return;
   }
 
-  node.innerHTML = items.map(renderCollectionItem).join("");
-  bindCardOpen(node);
-  bindDetailButtons(node);
-  node.querySelectorAll("[data-delete]").forEach((button) => {
-    button.addEventListener("click", (event) => {
+  if (level === "set") {
+    $("#collectionNavTitle").textContent = state.collectionBrowse.setName || state.collectionBrowse.setCode;
+    $("#collectionNavEyebrow").textContent = "Extension";
+    $("#collectionSetView").innerHTML = `<div class="panel"><p class="muted">Chargement...</p></div>`;
+    const payload = await api(`/api/collection/${encodeURIComponent(state.collectionBrowse.setCode)}`);
+    renderCollectionSet(payload);
+    return;
+  }
+
+  $("#collectionNavTitle").textContent = state.collectionBrowse.sectionLabel || state.collectionBrowse.sectionCode;
+  $("#collectionNavEyebrow").textContent = state.collectionBrowse.setName || "";
+  await loadCollectionCards();
+}
+
+function buildCollectionSortParam() {
+  const browse = state.collectionBrowse;
+  const primary = browse.sortPrimary || "price_desc";
+  if (browse.multiSort && browse.sortSecondary) {
+    return `${primary},${browse.sortSecondary}`;
+  }
+  return primary;
+}
+
+const COLLECTION_SORT_OPTIONS = [
+  { value: "price_desc", label: "Prix decroissant" },
+  { value: "price_asc", label: "Prix croissant" },
+  { value: "number_asc", label: "Numero croissant" },
+  { value: "number_desc", label: "Numero decroissant" },
+  { value: "name_asc", label: "Nom A-Z" },
+  { value: "name_desc", label: "Nom Z-A" },
+];
+
+function renderSortOptions(selectedValue, includeEmpty = false) {
+  const emptyOption = includeEmpty ? `<option value="">—</option>` : "";
+  return (
+    emptyOption +
+    COLLECTION_SORT_OPTIONS.map(
+      (option) =>
+        `<option value="${option.value}" ${option.value === selectedValue ? "selected" : ""}>${option.label}</option>`,
+    ).join("")
+  );
+}
+
+const CARD_SIZE_STORAGE_KEY = "mtg_catalog_card_min";
+const DEFAULT_CATALOG_CARD_SIZE = 110;
+const MIN_CATALOG_CARD_SIZE = 80;
+const MAX_CATALOG_CARD_SIZE = 200;
+
+function applyCatalogCardSize(sizePx) {
+  const size = Math.max(MIN_CATALOG_CARD_SIZE, Math.min(MAX_CATALOG_CARD_SIZE, sizePx));
+  state.collectionBrowse.cardSize = size;
+  document.documentElement.style.setProperty("--catalog-card-min", `${size}px`);
+  document.documentElement.style.setProperty("--catalog-price-max", `${Math.round(size * 0.115)}px`);
+  document.documentElement.style.setProperty("--catalog-price-min", `${Math.max(10, Math.round(size * 0.085))}px`);
+  document.documentElement.style.setProperty("--catalog-qty-btn", `${Math.max(1.15, Math.round(size * 0.0122 * 100) / 100)}rem`);
+  localStorage.setItem(CARD_SIZE_STORAGE_KEY, String(size));
+  const slider = $("#catalogCardSizeInput");
+  if (slider && Number(slider.value) !== size) {
+    slider.value = String(size);
+  }
+  const cardsView = $("#collectionCardsView");
+  if (cardsView && !cardsView.classList.contains("hidden")) {
+    fitCatalogPriceLabels(cardsView);
+  }
+}
+
+function initCatalogCardSize() {
+  const stored = parseInt(localStorage.getItem(CARD_SIZE_STORAGE_KEY) || "", 10);
+  applyCatalogCardSize(Number.isFinite(stored) ? stored : DEFAULT_CATALOG_CARD_SIZE);
+}
+
+function waitForPaint() {
+  return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+}
+
+async function loadCollectionCards() {
+  const sort = buildCollectionSortParam();
+  $("#collectionCardsView").innerHTML = `<div class="panel"><p class="muted">Chargement...</p></div>`;
+  const payload = await api(
+    `/api/collection/${encodeURIComponent(state.collectionBrowse.sectionCode)}/cards?sort=${encodeURIComponent(sort)}`,
+  );
+  renderCollectionCards(payload);
+}
+
+async function refreshCollectionPrices(scope, onProgress) {
+  const browse = state.collectionBrowse;
+  const baseBody =
+    scope === "block"
+      ? { scope: "block", set_code: browse.setCode }
+      : { scope: "section", section_code: browse.sectionCode, set_code: browse.setCode };
+
+  let offset = 0;
+  let total = 0;
+  let refreshed = 0;
+  let errors = 0;
+
+  while (true) {
+    const payload = await api("/api/collection/refresh-prices", {
+      method: "POST",
+      body: JSON.stringify({ ...baseBody, offset, limit: 75 }),
+    });
+    const result = payload.refresh || {};
+    total = result.cards_total || total;
+    refreshed += result.cards_refreshed || 0;
+    errors += result.errors || 0;
+    offset = result.next_offset ?? offset;
+    if (onProgress) {
+      onProgress({ done: Math.min(offset, total), total, errors });
+    }
+    if (result.done === true || result.next_offset == null || offset >= total) {
+      return { cards_total: total, cards_refreshed: refreshed, errors };
+    }
+  }
+}
+
+function setCollectionPriceProgress(done, total, title = "Chargement des prix") {
+  const wrap = $("#collectionPriceProgress");
+  const bar = $("#collectionPriceProgressBar");
+  const label = $("#collectionPriceProgressLabel");
+  const titleNode = $("#collectionPriceProgressTitle");
+  if (!wrap || !bar || !label) {
+    return;
+  }
+  const safeTotal = Math.max(total || 0, 1);
+  const safeDone = Math.min(Math.max(done || 0, 0), safeTotal);
+  const percent = Math.max(4, Math.round((safeDone / safeTotal) * 100));
+  wrap.classList.remove("hidden");
+  bar.style.width = `${percent}%`;
+  label.textContent = `${safeDone} / ${safeTotal} (${percent}%)`;
+  if (titleNode) {
+    titleNode.textContent = title;
+  }
+}
+
+function hideCollectionPriceProgress() {
+  const wrap = $("#collectionPriceProgress");
+  if (!wrap) {
+    return;
+  }
+  wrap.classList.add("hidden");
+  const bar = $("#collectionPriceProgressBar");
+  if (bar) {
+    bar.style.width = "0%";
+  }
+}
+
+function fitCatalogPriceLabels(root = document) {
+  const maxPx = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--catalog-price-max")) || 12;
+  const minPx = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--catalog-price-min")) || 10;
+  const nodes = root.querySelectorAll ? root.querySelectorAll(".catalog-card-price") : [];
+  nodes.forEach((el) => {
+    el.classList.remove("is-stacked");
+    el.style.fontSize = `${maxPx}px`;
+    el.style.lineHeight = "1.15";
+    let size = maxPx;
+    while (el.scrollWidth > el.clientWidth && size > minPx) {
+      size -= 0.5;
+      el.style.fontSize = `${size}px`;
+    }
+    if (el.scrollWidth > el.clientWidth) {
+      el.classList.add("is-stacked");
+      el.style.fontSize = `${minPx}px`;
+      el.style.lineHeight = "1.05";
+      const nonfoil = el.dataset.priceNonfoil || "";
+      const foil = el.dataset.priceFoil || "";
+      if (nonfoil && foil) {
+        el.textContent = `${nonfoil}\n${foil}`;
+      }
+    }
+  });
+}
+
+let catalogPriceFitObserver = null;
+
+function observeCatalogPriceFit(node) {
+  if (catalogPriceFitObserver) {
+    catalogPriceFitObserver.disconnect();
+  }
+  fitCatalogPriceLabels(node);
+  if (typeof ResizeObserver === "undefined") {
+    return;
+  }
+  catalogPriceFitObserver = new ResizeObserver(() => fitCatalogPriceLabels(node));
+  const grid = node.querySelector(".catalog-card-grid");
+  if (grid) {
+    catalogPriceFitObserver.observe(grid);
+  }
+}
+
+function formatCatalogPrice(card) {
+  const nonfoil = card.price_nonfoil;
+  const foil = card.price_foil;
+  if (nonfoil != null && foil != null) {
+    return `${money(nonfoil)} · ${money(foil)}`;
+  }
+  if (nonfoil != null) {
+    return money(nonfoil);
+  }
+  if (foil != null) {
+    return money(foil);
+  }
+  return "—";
+}
+
+async function adjustCollectionQty(scryfallId, finish, delta) {
+  const payload = await api("/api/collection/adjust", {
+    method: "POST",
+    body: JSON.stringify({ scryfall_id: scryfallId, finish, delta }),
+  });
+  renderCollection(payload);
+  return payload;
+}
+
+function renderCollectionSet(payload) {
+  const node = $("#collectionSetView");
+  node.innerHTML = `
+    <div class="collection-set-toolbar">
+      <p class="muted">Sous-sections de ${escapeHtml(payload.set?.name || state.collectionBrowse.setName || "")}</p>
+      <button class="secondary" id="refreshSetPrices" type="button">Charger les prix du bloc</button>
+    </div>
+    <div class="set-section-grid">
+      ${payload.sections
+        .map(
+          (section) => `
+          <button class="set-section-tile" type="button" data-open-section data-section-code="${escapeHtml(section.code)}" data-section-label="${escapeHtml(section.label)}">
+            <strong>${escapeHtml(section.label)}</strong>
+            <span>${formatSetStats(section)}</span>
+          </button>
+        `,
+        )
+        .join("")}
+    </div>
+  `;
+  node.querySelector("#refreshSetPrices")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    const estimatedTotal = payload.sections.reduce((sum, section) => sum + (section.total_cards || 0), 0) || 1;
+    try {
+      setLoading(button, true, "Chargement...");
+      setCollectionPriceProgress(0, estimatedTotal, "Chargement des prix du bloc");
+      await waitForPaint();
+      const refresh = await refreshCollectionPrices("block", ({ done, total }) =>
+        setCollectionPriceProgress(done, total, "Chargement des prix du bloc"),
+      );
+      toast(`${refresh.cards_refreshed || 0} / ${refresh.cards_total || 0} prix charges`);
+      setCollectionPriceProgress(refresh.cards_total || 0, refresh.cards_total || 1, "Chargement des prix du bloc");
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      invalidateCollectionBlocksCache();
+      const updated = await api(`/api/collection/${encodeURIComponent(state.collectionBrowse.setCode)}`);
+      renderCollectionSet(updated);
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      hideCollectionPriceProgress();
+      setLoading(button, false);
+    }
+  });
+  node.querySelectorAll("[data-open-section]").forEach((button) => {
+    button.addEventListener("click", () =>
+      openCollectionSection(button.dataset.sectionCode, button.dataset.sectionLabel),
+    );
+  });
+}
+
+function invalidateCollectionBlocksCache() {
+  state.collectionBrowse.blocksStale = true;
+}
+
+function renderCollectionCards(payload) {
+  const summary = payload.summary || {};
+  state.collectionBrowse.cardsTotal = summary.total_cards || 0;
+  const browse = state.collectionBrowse;
+  const node = $("#collectionCardsView");
+  const unavailable = payload.unavailable
+    ? `<div class="panel"><p class="muted">Catalogue indisponible pour cette section (donnees MTGJSON absentes).</p></div>`
+    : "";
+  node.innerHTML = `
+    <div class="collection-cards-toolbar">
+      <div class="collection-cards-summary">
+        ${summary.owned_unique || 0} (${summary.owned_cards || 0}) / ${summary.total_cards || 0} cartes -
+        ${money(summary.owned_value_eur || 0)} / ${money(summary.total_value_eur || 0)}
+      </div>
+      <div class="collection-cards-controls">
+        <label class="collection-cards-sort">
+          <span>Trier</span>
+          <select id="collectionSortPrimary" aria-label="Tri principal">
+            ${renderSortOptions(browse.sortPrimary)}
+          </select>
+        </label>
+        <label class="collection-cards-sort check-row collection-multi-sort">
+          <input id="collectionMultiSort" type="checkbox" ${browse.multiSort ? "checked" : ""} />
+          Tri multiple
+        </label>
+        <label class="collection-cards-sort ${browse.multiSort ? "" : "hidden"}" id="collectionSecondarySortWrap">
+          <span>Puis</span>
+          <select id="collectionSortSecondary" aria-label="Tri secondaire" ${browse.multiSort ? "" : "disabled"}>
+            ${renderSortOptions(browse.sortSecondary, true)}
+          </select>
+        </label>
+        <button class="secondary" id="refreshSectionPrices" type="button">Charger les prix</button>
+        <label class="collection-card-size">
+          <span>Taille</span>
+          <input
+            id="catalogCardSizeInput"
+            type="range"
+            min="${MIN_CATALOG_CARD_SIZE}"
+            max="${MAX_CATALOG_CARD_SIZE}"
+            step="5"
+            value="${state.collectionBrowse.cardSize || DEFAULT_CATALOG_CARD_SIZE}"
+          />
+        </label>
+      </div>
+    </div>
+    ${unavailable}
+    <div class="catalog-card-grid">
+      ${(payload.cards || []).map(renderCatalogCard).join("")}
+    </div>
+  `;
+
+  const applySort = () => {
+    browse.sortPrimary = $("#collectionSortPrimary").value;
+    browse.sortSecondary = $("#collectionSortSecondary").value;
+    browse.multiSort = $("#collectionMultiSort").checked;
+    loadCollectionCards().catch((error) => toast(error.message));
+  };
+
+  node.querySelector("#collectionSortPrimary")?.addEventListener("change", applySort);
+  node.querySelector("#collectionSortSecondary")?.addEventListener("change", applySort);
+  node.querySelector("#collectionMultiSort")?.addEventListener("change", (event) => {
+    browse.multiSort = event.currentTarget.checked;
+    const wrap = node.querySelector("#collectionSecondarySortWrap");
+    const secondary = node.querySelector("#collectionSortSecondary");
+    wrap?.classList.toggle("hidden", !browse.multiSort);
+    if (secondary) {
+      secondary.disabled = !browse.multiSort;
+    }
+    if (!browse.multiSort) {
+      browse.sortSecondary = "";
+      if (secondary) {
+        secondary.value = "";
+      }
+    }
+    loadCollectionCards().catch((error) => toast(error.message));
+  });
+
+  node.querySelector("#catalogCardSizeInput")?.addEventListener("input", (event) => {
+    applyCatalogCardSize(Number(event.currentTarget.value));
+  });
+
+  node.querySelector("#refreshSectionPrices")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    const estimatedTotal = state.collectionBrowse.cardsTotal || summary.total_cards || 1;
+    try {
+      setLoading(button, true, "Chargement...");
+      setCollectionPriceProgress(0, estimatedTotal);
+      await waitForPaint();
+      const refresh = await refreshCollectionPrices("section", ({ done, total }) => setCollectionPriceProgress(done, total));
+      toast(`${refresh.cards_refreshed || 0} / ${refresh.cards_total || 0} prix charges`);
+      setCollectionPriceProgress(refresh.cards_total || 0, refresh.cards_total || 1);
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      await loadCollectionCards();
+    } catch (error) {
+      toast(error.message || "Erreur lors du chargement des prix");
+    } finally {
+      hideCollectionPriceProgress();
+      setLoading(button, false);
+    }
+  });
+
+  node.querySelectorAll("[data-qty-delta]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
       event.stopPropagation();
-      deleteItem(button.dataset.itemId, button);
+      const target = event.currentTarget;
+      const cardNode = target.closest(".catalog-card");
+      if (!cardNode) {
+        return;
+      }
+      const delta = Number(target.dataset.qtyDelta || 0);
+      try {
+        setLoading(target, true, delta > 0 ? "+" : "-");
+        await adjustCollectionQty(cardNode.dataset.cardId, cardNode.dataset.finish || "nonfoil", delta);
+        invalidateCollectionBlocksCache();
+        await loadCollectionCards();
+      } catch (error) {
+        toast(error.message);
+      } finally {
+        setLoading(target, false);
+      }
     });
   });
+
+  bindCardOpen(node);
+  observeCatalogPriceFit(node);
+}
+
+function renderCatalogCard(card) {
+  const ownedClass = card.owned ? "catalog-card owned" : "catalog-card";
+  const priceText = formatCatalogPrice(card);
+  const priceAttrs =
+    card.price_nonfoil != null || card.price_foil != null
+      ? `data-price-nonfoil="${escapeHtml(card.price_nonfoil != null ? money(card.price_nonfoil) : "")}" data-price-foil="${escapeHtml(card.price_foil != null ? money(card.price_foil) : "")}"`
+      : "";
+  const image = card.image_url
+    ? `<img src="${card.image_url}" alt="${escapeHtml(card.name)}" loading="lazy" />`
+    : `<div class="catalog-card-placeholder"></div>`;
+  const openAttrs = card.scryfall_id
+    ? `data-card-open data-card-id="${escapeHtml(card.scryfall_id)}" data-finish="${escapeHtml(card.finish || "nonfoil")}" role="button" tabindex="0"`
+    : "";
+  const footerClass = card.scryfall_id ? "catalog-card-footer" : "catalog-card-footer catalog-card-footer-no-actions";
+  const minusBtn = card.scryfall_id
+    ? `<button class="catalog-card-qty-btn" type="button" data-qty-delta="-1" aria-label="Retirer une copie">−</button>`
+    : "";
+  const plusBtn = card.scryfall_id
+    ? `<button class="catalog-card-qty-btn" type="button" data-qty-delta="1" aria-label="Ajouter une copie">+</button>`
+    : "";
+  return `
+    <article class="${ownedClass}" ${openAttrs} data-card-id="${escapeHtml(card.scryfall_id || "")}" data-finish="${escapeHtml(card.finish || "nonfoil")}">
+      <div class="catalog-card-image-wrap">
+        <div class="catalog-card-image">${image}</div>
+        ${card.quantity ? `<span class="catalog-card-qty">${card.quantity}</span>` : ""}
+      </div>
+      <div class="${footerClass}">
+        ${minusBtn}
+        <span class="catalog-card-price" ${priceAttrs} title="${escapeHtml(priceText)}">${priceText}</span>
+        ${plusBtn}
+      </div>
+    </article>
+  `;
+}
+
+function backCollectionLevel() {
+  if (state.collectionBrowse.level === "cards") {
+    openCollectionSet(state.collectionBrowse.setCode, state.collectionBrowse.setName).catch((error) => toast(error.message));
+    return;
+  }
+  if (state.collectionBrowse.level === "set") {
+    showCollectionLevel("blocks").catch((error) => toast(error.message));
+  }
 }
 
 function renderCollectionItem(item) {
@@ -777,32 +1450,28 @@ $("#searchForm").addEventListener("submit", async (event) => {
   }
 });
 
-$("#deckSearchForm").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const submit = event.currentTarget.querySelector("button[type='submit']");
-  const params = new URLSearchParams({
-    q: $("#deckSearchInput").value,
-    limit: "30",
-    commander_only: $("#commanderOnlyInput").checked ? "true" : "false",
-    hide_collector: $("#hideCollectorInput").checked ? "true" : "false",
-    sort: $("#deckSortInput").value,
-  });
-  try {
-    setLoading(submit, true, "Recherche...");
-    const payload = await api(`/api/decks/search?${params.toString()}`);
-    renderDeckResults(payload.decks);
-  } catch (error) {
-    toast(error.message);
-  } finally {
-    setLoading(submit, false);
-  }
+async function reloadDeckFilters() {
+  await loadDeckExtensions();
+  await loadDecks(1);
+}
+
+$("#deckSearchInput").addEventListener("input", scheduleDeckReload);
+$("#commanderOnlyInput").addEventListener("change", () => reloadDeckFilters().catch((error) => toast(error.message)));
+$("#hideCollectorInput").addEventListener("change", () => reloadDeckFilters().catch((error) => toast(error.message)));
+$("#deckExtensionInput").addEventListener("change", () => loadDecks(1).catch((error) => toast(error.message)));
+$("#deckSortInput").addEventListener("change", () => loadDecks(1).catch((error) => toast(error.message)));
+$("#deckFilterToggle").addEventListener("click", (event) => toggleDeckPanel(event.currentTarget, $("#deckFilters")));
+$("#deckMenuToggle").addEventListener("click", (event) => toggleDeckPanel(event.currentTarget, $("#deckMenu")));
+$("#deckImportInfo").addEventListener("click", (event) => {
+  const button = event.currentTarget;
+  toast(button.getAttribute("title") || "Info import MTGJSON");
 });
 
 document.querySelectorAll(".tab").forEach((button) => {
   button.addEventListener("click", () => switchTab(button.dataset.tab));
 });
 
-$("#refreshPrices").addEventListener("click", (event) => refreshPrices(event.currentTarget));
+$("#collectionBack").addEventListener("click", backCollectionLevel);
 $("#preloadCommanderPrices").addEventListener("click", (event) => startCommanderPreload(event.currentTarget));
 $("#backFromCard").addEventListener("click", backFromCard);
 
@@ -811,4 +1480,5 @@ if ("serviceWorker" in navigator) {
 }
 
 loadCollection().catch((error) => toast(error.message));
+initCatalogCardSize();
 pollPreloadStatus();

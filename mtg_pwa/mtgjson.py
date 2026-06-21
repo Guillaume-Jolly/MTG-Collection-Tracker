@@ -10,6 +10,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+from .local_cache import load_deck, load_deck_list, load_set_list
+
 
 MTGJSON_BASE_URL = "https://mtgjson.com/api/v5"
 ALL_PRICES_GZ_URL = f"{MTGJSON_BASE_URL}/AllPrices.json.gz"
@@ -75,16 +77,16 @@ def fetch_gzip_json(url: str) -> dict[str, Any]:
         raise MtgjsonError(f"MTGJSON request failed: {error.reason}") from error
 
 
-def search_decks(
+def filter_decks(
     query: str,
-    limit: int = 30,
+    *,
     commander_only: bool = True,
     hide_collector: bool = False,
-    sort: str = "release_desc",
+    extension: str = "",
 ) -> list[dict[str, Any]]:
-    payload = fetch_gzip_json(DECK_LIST_GZ_URL)
-    decks = payload.get("data") or []
+    decks = load_deck_list()
     normalized_query = query.strip().lower()
+    normalized_extension = extension.strip().upper()
 
     if commander_only:
         decks = [deck for deck in decks if deck.get("type") == "Commander Deck"]
@@ -94,6 +96,8 @@ def search_decks(
             for deck in decks
             if "collector" not in f"{deck.get('name', '')} {deck.get('fileName', '')}".lower()
         ]
+    if normalized_extension:
+        decks = [deck for deck in decks if (deck.get("code") or "").upper() == normalized_extension]
 
     if normalized_query:
         tokens = normalized_query.split()
@@ -105,13 +109,58 @@ def search_decks(
                 for token in tokens
             )
         ]
-    else:
+    elif not commander_only:
         preferred_types = {"Commander Deck", "Challenger Deck", "Theme Deck", "Starter Deck"}
-        if not commander_only:
-            decks = [deck for deck in decks if deck.get("type") in preferred_types]
+        decks = [deck for deck in decks if deck.get("type") in preferred_types]
 
-    sorted_decks = sort_decks(decks, sort)
-    return [
+    return decks
+
+
+_SET_NAME_MAP: dict[str, str] | None = None
+
+
+def set_name_map() -> dict[str, str]:
+    global _SET_NAME_MAP
+    if _SET_NAME_MAP is None:
+        _SET_NAME_MAP = {
+            (entry.get("code") or "").upper(): entry.get("name") or entry.get("code") or ""
+            for entry in load_set_list()
+            if entry.get("code")
+        }
+    return _SET_NAME_MAP
+
+
+def list_deck_extensions(
+    *,
+    commander_only: bool = True,
+    hide_collector: bool = False,
+) -> list[dict[str, str]]:
+    decks = filter_decks("", commander_only=commander_only, hide_collector=hide_collector)
+    codes = sorted({(deck.get("code") or "").upper() for deck in decks if deck.get("code")})
+    names = set_name_map()
+    extensions = [{"code": code, "name": names.get(code) or code} for code in codes]
+    return sorted(extensions, key=lambda entry: entry["name"].lower())
+
+
+def search_decks(
+    query: str,
+    limit: int = 30,
+    offset: int = 0,
+    commander_only: bool = True,
+    hide_collector: bool = False,
+    extension: str = "",
+    sort: str = "release_desc",
+) -> tuple[list[dict[str, Any]], int]:
+    sorted_decks = sort_decks(
+        filter_decks(
+            query,
+            commander_only=commander_only,
+            hide_collector=hide_collector,
+            extension=extension,
+        ),
+        sort,
+    )
+    summaries = [
         {
             "code": deck.get("code"),
             "file_name": deck.get("fileName"),
@@ -120,8 +169,10 @@ def search_decks(
             "type": deck.get("type"),
             "source": deck.get("source"),
         }
-        for deck in sorted_decks[:limit]
+        for deck in sorted_decks
     ]
+    total = len(summaries)
+    return summaries[offset : offset + limit], total
 
 
 def sort_decks(decks: list[dict[str, Any]], sort: str) -> list[dict[str, Any]]:
@@ -135,9 +186,7 @@ def sort_decks(decks: list[dict[str, Any]], sort: str) -> list[dict[str, Any]]:
 
 
 def fetch_deck(file_name: str) -> dict[str, Any]:
-    safe_file_name = quote(file_name, safe="")
-    payload = fetch_json(f"{MTGJSON_BASE_URL}/decks/{safe_file_name}.json")
-    return payload.get("data") or {}
+    return load_deck(file_name)
 
 
 def importable_deck_cards(deck: dict[str, Any]) -> list[dict[str, Any]]:

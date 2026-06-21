@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#171224" />
     <title>MTG Price Tracker</title>
     <link rel="manifest" href="/manifest.json" />
-    <link rel="stylesheet" href="/styles.css?v=deck-sort-v13" />
+    <link rel="stylesheet" href="/styles.css?v=collection-grid-v27" />
   </head>
   <body>
     <header class="app-header">
@@ -63,36 +63,58 @@
       </section>
 
       <section class="screen" id="screen-collection">
-        <div class="summary-grid">
-          <article>
-            <span>Total estime</span>
-            <strong id="summaryValue">0,00 EUR</strong>
-          </article>
-          <article>
-            <span>Cartes</span>
-            <strong id="summaryCards">0</strong>
-          </article>
-          <article>
-            <span>Uniques</span>
-            <strong id="summaryUnique">0</strong>
-          </article>
+        <div class="collection-nav hidden" id="collectionNav">
+          <button class="icon-button" id="collectionBack" type="button" aria-label="Retour">&#8249;</button>
+          <div>
+            <p class="eyebrow" id="collectionNavEyebrow"></p>
+            <h2 id="collectionNavTitle">Collection</h2>
+          </div>
         </div>
-        <button class="secondary full" id="refreshPrices">Rafraichir prix collection</button>
-        <div id="collectionList" class="collection-list"></div>
+        <div id="collectionBlocksView"></div>
+        <div class="hidden" id="collectionSetView"></div>
+        <div class="hidden" id="collectionCardsView"></div>
       </section>
 
+      <div class="collection-price-overlay hidden" id="collectionPriceProgress" aria-live="polite" role="status">
+        <div class="collection-price-overlay-head">
+          <strong id="collectionPriceProgressTitle">Chargement des prix</strong>
+          <span class="collection-price-progress-label" id="collectionPriceProgressLabel">0 / 0</span>
+        </div>
+        <div class="collection-price-progress-track">
+          <div class="collection-price-progress-bar" id="collectionPriceProgressBar"></div>
+        </div>
+      </div>
+
       <section class="screen" id="screen-decks">
-        <form class="search-form" id="deckSearchForm">
+        <div class="deck-toolbar">
+          <label class="deck-search-field">
+            <span class="sr-only">Filtrer les decks</span>
+            <input id="deckSearchInput" name="q" type="search" autocomplete="off" placeholder="Filtrer les decks..." />
+          </label>
+          <button class="icon-button" id="deckFilterToggle" type="button" aria-label="Filtres" aria-expanded="false" title="Filtres">&#9881;</button>
+          <button class="icon-button" id="deckMenuToggle" type="button" aria-label="Options avancees" aria-expanded="false" title="Options">&#8942;</button>
+          <button
+            class="icon-button info-tip"
+            id="deckImportInfo"
+            type="button"
+            aria-label="Info import MTGJSON"
+            title="Les imports de decks utilisent MTGJSON : les cartes importees correspondent aux versions exactes du produit quand MTGJSON fournit un identifiant Scryfall."
+          >i</button>
+        </div>
+
+        <div class="deck-filters panel hidden" id="deckFilters">
           <label>
-            Deck preconstruit
-            <input id="deckSearchInput" name="q" type="search" autocomplete="off" placeholder="Ex: Final Fantasy, Counter Blitz, Fallout" />
+            Extension
+            <select id="deckExtensionInput" name="extension">
+              <option value="">Toutes les extensions</option>
+            </select>
           </label>
           <label class="check-row">
             <input id="commanderOnlyInput" name="commander_only" type="checkbox" checked />
             Commander decks uniquement
           </label>
           <label class="check-row">
-            <input id="hideCollectorInput" name="hide_collector" type="checkbox" />
+            <input id="hideCollectorInput" name="hide_collector" type="checkbox" checked />
             Cacher les versions Collector
           </label>
           <label>
@@ -104,19 +126,19 @@
               <option value="name">Nom</option>
             </select>
           </label>
-          <button type="submit" class="primary">Chercher des precons MTGJSON</button>
-        </form>
-        <div class="notice">
-          Les imports de decks utilisent MTGJSON: les cartes importees correspondent aux versions exactes du produit quand MTGJSON fournit un identifiant Scryfall.
         </div>
-        <div class="panel preload-panel">
+
+        <div class="deck-menu panel hidden" id="deckMenu">
           <h2>Prix des precons Commander</h2>
-          <p class="muted">Precharge les prix MTGJSON des cartes presentes dans les decks Commander pour accelerer les fiches deck.</p>
+          <p class="muted">Precharge les prix MTGJSON des cartes presentes dans les decks Commander.</p>
           <button class="secondary full" id="preloadCommanderPrices">Precharger les prix Commander</button>
           <div id="preloadStatus" class="helper-text">Statut: non lance.</div>
         </div>
+
+        <div class="deck-list-meta" id="deckListMeta"></div>
         <div id="deckPreview"></div>
         <div id="deckResults" class="deck-list"></div>
+        <nav class="deck-pagination" id="deckPagination" aria-label="Pagination des decks"></nav>
       </section>
 
       <section class="screen" id="screen-prices">
@@ -134,6 +156,6 @@
     </main>
 
     <div id="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js?v=deck-sort-v13" type="module"></script>
+    <script src="/app.js?v=collection-grid-v27" type="module"></script>
   </body>
 </html>

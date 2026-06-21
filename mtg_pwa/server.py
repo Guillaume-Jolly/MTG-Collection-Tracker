@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import mimetypes
 import os
 import threading
@@ -15,6 +16,7 @@ from urllib.parse import parse_qs, urlparse
 from .database import (
     DEFAULT_DB_PATH,
     add_collection_item,
+    adjust_collection_quantity,
     card_summary,
     cached_mtgjson_price_entry,
     cached_mtgjson_uuid,
@@ -25,6 +27,7 @@ from .database import (
     init_db,
     latest_snapshot,
     list_collection,
+    collection_summary as db_collection_summary,
     price_history,
     price_periods,
     save_card,
@@ -44,13 +47,25 @@ from .mtgjson import (
     extract_price_entries,
     fetch_deck,
     importable_deck_cards,
+    list_deck_extensions,
     market_summaries,
     mtgjson_uuid_for_scryfall_card,
     normalize_price_points,
     search_decks,
 )
-from .prices import current_eur_price
+from .local_cache import CacheError, image_path
 from .scryfall import ScryfallClient, ScryfallError
+from .preload import preload_commander_decks
+from .prices import current_eur_price
+from .sets_catalog import (
+    blocks_catalog,
+    enrich_blocks_with_collection,
+    enrich_sections_with_stats,
+    set_cards,
+    scryfall_ids_for_set_block,
+    scryfall_ids_for_set_code,
+    set_sections,
+)
 
 
 VALID_FINISHES = {"nonfoil", "foil", "etched"}
@@ -71,6 +86,13 @@ PRELOAD_STATUS: dict[str, Any] = {
     "snapshots_written": 0,
 }
 PRELOAD_LOCK = threading.Lock()
+COLLECTION_BLOCKS_CACHE: dict[str, Any] = {"expires_at": 0.0, "payload": None}
+COLLECTION_BLOCKS_CACHE_TTL = 120.0
+
+
+def invalidate_collection_blocks_cache() -> None:
+    COLLECTION_BLOCKS_CACHE["expires_at"] = 0.0
+    COLLECTION_BLOCKS_CACHE["payload"] = None
 
 
 class MvpRequestHandler(BaseHTTPRequestHandler):
@@ -81,6 +103,9 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path.startswith("/api/"):
             self.handle_api("GET", parsed.path, parse_qs(parsed.query))
+            return
+        if parsed.path.startswith("/cache/images/"):
+            self.serve_cached_image(parsed.path)
             return
         self.serve_static(parsed.path)
 
@@ -108,6 +133,9 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
             if method == "GET" and path == "/api/search":
                 self.search_cards(query)
                 return
+            if method == "GET" and path == "/api/collection/summary":
+                self.collection_summary()
+                return
             if method == "GET" and path == "/api/collection":
                 self.collection()
                 return
@@ -119,6 +147,9 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
                 return
             if method == "GET" and path == "/api/decks/search":
                 self.search_decks(query)
+                return
+            if method == "GET" and path == "/api/decks/extensions":
+                self.deck_extensions(query)
                 return
             if method == "POST" and path == "/api/decks/import":
                 self.import_deck()
@@ -133,15 +164,44 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
                 self.commander_preload_status()
                 return
 
+            if method == "GET" and path == "/api/collection/blocks":
+                self.collection_blocks()
+                return
+            if method == "POST" and path == "/api/collection/adjust":
+                self.adjust_collection()
+                return
+            if method == "POST" and path == "/api/collection/refresh-prices":
+                self.refresh_collection_prices()
+                return
+
             segments = path.strip("/").split("/")
+            if (
+                method == "GET"
+                and len(segments) == 4
+                and segments[:2] == ["api", "collection"]
+                and segments[3] == "cards"
+            ):
+                self.collection_set_cards(segments[2], query)
+                return
             if len(segments) == 3 and segments[:2] == ["api", "collection"]:
-                item_id = int(segments[2])
-                if method == "PATCH":
-                    self.update_collection(item_id)
+                segment = segments[2]
+                if method == "POST" and segment == "refresh-prices":
+                    self.refresh_collection_prices()
                     return
-                if method == "DELETE":
-                    self.delete_from_collection(item_id)
+                if method == "POST" and segment == "adjust":
+                    self.adjust_collection()
                     return
+                if method == "GET" and not segment.isdigit():
+                    self.collection_set_detail(segment)
+                    return
+                if segment.isdigit():
+                    item_id = int(segment)
+                    if method == "PATCH":
+                        self.update_collection(item_id)
+                        return
+                    if method == "DELETE":
+                        self.delete_from_collection(item_id)
+                        return
             if len(segments) == 4 and segments[:2] == ["api", "cards"] and segments[3] == "prices":
                 if method == "GET":
                     self.card_prices(segments[2], query)
@@ -155,6 +215,8 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
         except ValueError as error:
             self.json_response({"error": str(error)}, status=HTTPStatus.BAD_REQUEST)
         except ScryfallError as error:
+            self.json_response({"error": str(error)}, status=HTTPStatus.BAD_GATEWAY)
+        except CacheError as error:
             self.json_response({"error": str(error)}, status=HTTPStatus.BAD_GATEWAY)
         except Exception as error:  # noqa: BLE001 - server should return JSON errors.
             self.json_response({"error": str(error)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -185,17 +247,150 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
         with open_db() as conn:
             self.json_response(list_collection(conn))
 
+    def collection_summary(self) -> None:
+        with open_db() as conn:
+            self.json_response(db_collection_summary(conn))
+
+    def collection_blocks(self) -> None:
+        now = time.time()
+        cached = COLLECTION_BLOCKS_CACHE
+        if cached["payload"] is not None and now < cached["expires_at"]:
+            self.json_response(cached["payload"])
+            return
+
+        payload = {"categories": enrich_blocks_with_collection(blocks_catalog())}
+        cached["payload"] = payload
+        cached["expires_at"] = now + COLLECTION_BLOCKS_CACHE_TTL
+        self.json_response(payload)
+
+    def collection_set_detail(self, set_code: str) -> None:
+        payload = set_sections(set_code)
+        payload["sections"] = enrich_sections_with_stats(payload["sections"])
+        self.json_response(payload)
+
+    def collection_set_cards(self, set_code: str, query: dict[str, list[str]]) -> None:
+        sort = one(query, "sort", "price_desc")
+        self.json_response(set_cards(set_code, sort=sort))
+
+    def adjust_collection(self) -> None:
+        payload = self.read_json()
+        scryfall_id = str(payload.get("scryfall_id") or "").strip()
+        finish = str(payload.get("finish") or "nonfoil")
+        delta = int(payload.get("delta") or 0)
+        if not scryfall_id:
+            raise ValueError("scryfall_id est requis.")
+        if finish not in VALID_FINISHES:
+            raise ValueError("Finition invalide.")
+
+        with open_db() as conn:
+            client = ScryfallClient()
+            card = ensure_card(conn, scryfall_id)
+            ensure_price_fallback(conn, client, card, finish)
+            result = adjust_collection_quantity(conn, scryfall_id=scryfall_id, finish=finish, delta=delta)
+            summary = db_collection_summary(conn)
+        invalidate_collection_blocks_cache()
+        self.json_response({**summary, "adjust": result})
+
+    def refresh_collection_prices(self) -> None:
+        payload = self.read_json(default={})
+        scope = str(payload.get("scope") or "section").strip()
+        set_code = str(payload.get("set_code") or "").strip().upper()
+        section_code = str(payload.get("section_code") or set_code).strip().upper()
+        if not set_code and not section_code:
+            raise ValueError("set_code ou section_code est requis.")
+
+        if scope == "block":
+            scryfall_ids = scryfall_ids_for_set_block(set_code or section_code)
+        else:
+            scryfall_ids = scryfall_ids_for_set_code(section_code or set_code)
+
+        if not scryfall_ids:
+            raise ValueError("Aucune carte trouvee pour ce scope.")
+
+        offset = max(0, int(payload.get("offset", 0)))
+        batch_size = max(1, min(75, int(payload.get("limit", 75))))
+        batch_ids = scryfall_ids[offset : offset + batch_size]
+        if not batch_ids and offset == 0:
+            raise ValueError("Aucune carte trouvee pour ce scope.")
+        if not batch_ids:
+            self.json_response(
+                {
+                    "refresh": {
+                        "scope": scope,
+                        "set_code": set_code or section_code,
+                        "section_code": section_code or set_code,
+                        "cards_total": len(scryfall_ids),
+                        "offset": offset,
+                        "next_offset": offset,
+                        "done": True,
+                        "cards_refreshed": 0,
+                        "snapshots_written": 0,
+                        "errors": 0,
+                    }
+                }
+            )
+            return
+
+        client = ScryfallClient()
+        refreshed = 0
+        snapshot_count = 0
+        errors = 0
+        with open_db() as conn:
+            try:
+                cards = client.collection(batch_ids)
+                save_cards(conn, cards)
+                for card in cards:
+                    snapshot_count += save_price_snapshots(conn, card)
+                refreshed = len(cards)
+                client.throttle()
+            except ScryfallError:
+                errors = len(batch_ids)
+            conn.commit()
+
+        next_offset = offset + len(batch_ids)
+        done = next_offset >= len(scryfall_ids)
+
+        if done:
+            from .sets_catalog import refresh_set_stats_cache
+
+            for code in {section_code or set_code, set_code}:
+                if code:
+                    refresh_set_stats_cache(code)
+            invalidate_collection_blocks_cache()
+
+        self.json_response(
+            {
+                "refresh": {
+                    "scope": scope,
+                    "set_code": set_code or section_code,
+                    "section_code": section_code or set_code,
+                    "cards_total": len(scryfall_ids),
+                    "offset": offset,
+                    "next_offset": next_offset,
+                    "done": done,
+                    "cards_refreshed": refreshed,
+                    "snapshots_written": snapshot_count,
+                    "errors": errors,
+                }
+            }
+        )
+
     def search_decks(self, query: dict[str, list[str]]) -> None:
         search = one(query, "q", "").strip()
-        limit = int(one(query, "limit", "30"))
+        page = max(1, int(one(query, "page", "1")))
+        page_size = max(1, min(50, int(one(query, "page_size", "20"))))
+        offset = (page - 1) * page_size
         commander_only = one(query, "commander_only", "true").lower() in {"1", "true", "yes", "on"}
         hide_collector = one(query, "hide_collector", "false").lower() in {"1", "true", "yes", "on"}
+        extension = one(query, "extension", "").strip()
         sort = one(query, "sort", "release_desc")
-        decks = search_decks(
+        decks, total = search_decks(
             search,
-            limit=limit,
+            limit=page_size,
+            offset=offset,
             commander_only=commander_only,
             hide_collector=hide_collector,
+            extension=extension,
             sort=sort,
         )
         with open_db() as conn:
@@ -205,7 +400,22 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
                 enriched = dict(deck)
                 enriched["price_estimate"] = deck_menu_price_estimate(conn, deck_payload)
                 response_decks.append(enriched)
-        self.json_response({"decks": response_decks})
+        total_pages = max(1, math.ceil(total / page_size)) if total else 1
+        self.json_response(
+            {
+                "decks": response_decks,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": total_pages,
+            }
+        )
+
+    def deck_extensions(self, query: dict[str, list[str]]) -> None:
+        commander_only = one(query, "commander_only", "true").lower() in {"1", "true", "yes", "on"}
+        hide_collector = one(query, "hide_collector", "false").lower() in {"1", "true", "yes", "on"}
+        extensions = list_deck_extensions(commander_only=commander_only, hide_collector=hide_collector)
+        self.json_response({"extensions": extensions})
 
     def deck_detail(self, query: dict[str, list[str]]) -> None:
         file_name = one(query, "file_name", "").strip()
@@ -343,6 +553,7 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
             )
             response = list_collection(conn)
             response["created_item_id"] = item_id
+        invalidate_collection_blocks_cache()
         self.json_response(response, status=HTTPStatus.CREATED)
 
     def update_collection(self, item_id: int) -> None:
@@ -362,6 +573,7 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
                 self.json_response({"error": "Collection item not found"}, status=HTTPStatus.NOT_FOUND)
                 return
             self.json_response(list_collection(conn))
+        invalidate_collection_blocks_cache()
 
     def delete_from_collection(self, item_id: int) -> None:
         with open_db() as conn:
@@ -370,6 +582,7 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
                 self.json_response({"error": "Collection item not found"}, status=HTTPStatus.NOT_FOUND)
                 return
             self.json_response(list_collection(conn))
+        invalidate_collection_blocks_cache()
 
     def refresh_snapshots(self) -> None:
         payload = self.read_json(default={})
@@ -476,6 +689,22 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
         self.send_response(int(status))
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def serve_cached_image(self, path: str) -> None:
+        file_name = Path(path).name
+        scryfall_id = file_name.rsplit(".", 1)[0]
+        target = image_path(scryfall_id)
+        if not target.exists():
+            self.send_error(int(HTTPStatus.NOT_FOUND))
+            return
+
+        data = target.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=604800")
         self.end_headers()
         self.wfile.write(data)
 
@@ -594,7 +823,9 @@ def enrich_mtgjson_prices(conn, card: dict[str, Any]) -> tuple[list[dict[str, An
             save_mtgjson_price_entry(conn, mtgjson_uuid, price_entry)
 
         points = normalize_price_points(card["id"], price_entry)
-        inserted = save_external_price_snapshots(conn, points)
+        inserted = 0
+        if not cache_hit:
+            inserted = save_external_price_snapshots(conn, points)
         conn.commit()
         status.update(
             {
@@ -648,7 +879,10 @@ def enrich_deck_mtgjson_prices(conn, deck_cards: list[dict[str, Any]]) -> tuple[
             continue
         points.extend(normalize_price_points(deck_card["scryfall_id"], entry))
 
-    inserted = save_external_price_snapshots(conn, points)
+    # Les snapshots sont deja en base apres preload ; on calcule l'historique en memoire.
+    inserted = 0
+    if missing_uuids:
+        inserted = save_external_price_snapshots(conn, points)
     conn.commit()
     status.update(
         {
@@ -821,73 +1055,33 @@ def update_preload_status(**updates: Any) -> None:
 
 
 def preload_commander_prices(limit: int | None = None) -> None:
+    def on_status(updates: dict[str, Any]) -> None:
+        update_preload_status(**updates)
+
     try:
-        decks = search_decks("", limit=limit or 10000, commander_only=True)
-        if limit is not None:
-            decks = decks[:limit]
-        update_preload_status(decks_total=len(decks))
-
-        deck_cards: list[dict[str, Any]] = []
-        for index, deck in enumerate(decks, start=1):
-            deck_payload = fetch_deck(deck["file_name"])
-            deck_cards.extend(importable_deck_cards(deck_payload))
-            update_preload_status(decks_processed=index)
-
-        unique_by_uuid = {
-            card["mtgjson_uuid"]: card
-            for card in deck_cards
-            if card.get("mtgjson_uuid") and card.get("scryfall_id")
-        }
-        update_preload_status(unique_uuids=len(unique_by_uuid))
-
-        entries: dict[str, dict[str, Any]] = {}
-        missing_uuids: list[str] = []
-        with open_db() as conn:
-            for uuid, deck_card in unique_by_uuid.items():
-                save_mtgjson_uuid(
-                    conn,
-                    scryfall_id=deck_card["scryfall_id"],
-                    mtgjson_uuid=uuid,
-                    set_code=deck_card["set_code"],
-                    collector_number=deck_card["collector_number"],
-                )
-                cached = cached_mtgjson_price_entry(conn, uuid)
-                if cached is None:
-                    missing_uuids.append(uuid)
-                else:
-                    entries[uuid] = cached
-            conn.commit()
-
-        update_preload_status(cached_uuids=len(entries))
-        fetched_entries = extract_price_entries(missing_uuids)
-        update_preload_status(fetched_uuids=len(fetched_entries), missing_uuids=len(set(missing_uuids) - set(fetched_entries)))
-
-        all_points: list[dict[str, Any]] = []
-        with open_db() as conn:
-            scryfall_ids = sorted({card["scryfall_id"] for card in unique_by_uuid.values()})
-            client = ScryfallClient()
-            for index in range(0, len(scryfall_ids), 75):
-                save_cards(conn, client.collection(scryfall_ids[index : index + 75]))
-                update_preload_status(scryfall_cards_cached=min(index + 75, len(scryfall_ids)))
-
-            for uuid, entry in fetched_entries.items():
-                save_mtgjson_price_entry(conn, uuid, entry)
-                entries[uuid] = entry
-
-            for uuid, deck_card in unique_by_uuid.items():
-                entry = entries.get(uuid)
-                if entry is None:
-                    continue
-                all_points.extend(normalize_price_points(deck_card["scryfall_id"], entry))
-
-            snapshots_written = save_external_price_snapshots(conn, all_points)
-            conn.commit()
-
+        update_preload_status(running=True, started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+        result = preload_commander_decks(
+            limit=limit,
+            commander_only=True,
+            download_images=True,
+            on_status=on_status,
+        )
         update_preload_status(
-            points=len(all_points),
-            snapshots_written=snapshots_written,
             running=False,
-            finished_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            finished_at=result.get("finished_at"),
+            decks_total=result.get("decks_total", 0),
+            decks_processed=result.get("decks_processed", 0),
+            unique_uuids=result.get("unique_uuids", 0),
+            cached_uuids=result.get("cached_uuids", 0),
+            fetched_uuids=result.get("fetched_uuids", 0),
+            missing_uuids=result.get("missing_uuids", 0),
+            scryfall_cards_cached=result.get("scryfall_cards_cached", 0),
+            points=result.get("points", 0),
+            snapshots_written=result.get("snapshots_written", 0),
+            images_downloaded=result.get("images_downloaded", 0),
+            images_skipped=result.get("images_skipped", 0),
+            images_failed=result.get("images_failed", 0),
+            error=result.get("error"),
         )
     except Exception as error:  # noqa: BLE001 - background status should capture any failure.
         update_preload_status(
