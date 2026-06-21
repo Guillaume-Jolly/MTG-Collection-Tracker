@@ -1,0 +1,17 @@
+{
+  "name": "MTG Price Tracker",
+  "short_name": "MTG Prices",
+  "description": "Collection Magic: The Gathering avec suivi des prix EUR via Scryfall/Cardmarket.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#100d18",
+  "theme_color": "#171224",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

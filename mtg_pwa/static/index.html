@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#171224" />
+    <title>MTG Price Tracker</title>
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="stylesheet" href="/styles.css?v=deck-sort-v13" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <p class="eyebrow">MVP PWA</p>
+        <h1>MTG Price Tracker</h1>
+      </div>
+      <div class="total-pill" id="headerTotal">0,00 EUR</div>
+    </header>
+
+    <nav class="tabs" aria-label="Navigation principale">
+      <button class="tab active" data-tab="search">Recherche</button>
+      <button class="tab" data-tab="collection">Collection</button>
+      <button class="tab" data-tab="decks">Decks</button>
+      <button class="tab" data-tab="prices">Fiche</button>
+    </nav>
+
+    <main>
+      <section class="screen active" id="screen-search">
+        <form class="search-form" id="searchForm">
+          <label>
+            Carte
+            <input id="searchInput" name="q" type="search" autocomplete="off" placeholder="Ex: Lightning Bolt" required />
+          </label>
+          <div class="form-row">
+            <label>
+              Langue
+              <select id="langInput" name="lang">
+                <option value="fr" selected>FR</option>
+                <option value="en">EN</option>
+                <option value="all">Toutes</option>
+              </select>
+            </label>
+            <label>
+              Prix
+              <select id="finishInput" name="finish">
+                <option value="nonfoil" selected>Nonfoil</option>
+                <option value="foil">Foil</option>
+                <option value="etched">Etched</option>
+              </select>
+            </label>
+          </div>
+          <label class="check-row">
+            <input id="serializedInput" name="serialized" type="checkbox" />
+            Chercher uniquement les versions serialized
+          </label>
+          <p class="helper-text">Si cochee, la recherche ignore la langue pour retrouver les serialized anglaises.</p>
+          <button type="submit" class="primary">Chercher sur Scryfall</button>
+        </form>
+        <div class="notice">
+          Prix EUR prioritaire: champs Scryfall <code>eur</code>, <code>eur_foil</code>, <code>eur_etched</code>, utilises comme prix Cardmarket indicatifs.
+        </div>
+        <div id="searchResults" class="cards-grid"></div>
+      </section>
+
+      <section class="screen" id="screen-collection">
+        <div class="summary-grid">
+          <article>
+            <span>Total estime</span>
+            <strong id="summaryValue">0,00 EUR</strong>
+          </article>
+          <article>
+            <span>Cartes</span>
+            <strong id="summaryCards">0</strong>
+          </article>
+          <article>
+            <span>Uniques</span>
+            <strong id="summaryUnique">0</strong>
+          </article>
+        </div>
+        <button class="secondary full" id="refreshPrices">Rafraichir prix collection</button>
+        <div id="collectionList" class="collection-list"></div>
+      </section>
+
+      <section class="screen" id="screen-decks">
+        <form class="search-form" id="deckSearchForm">
+          <label>
+            Deck preconstruit
+            <input id="deckSearchInput" name="q" type="search" autocomplete="off" placeholder="Ex: Final Fantasy, Counter Blitz, Fallout" />
+          </label>
+          <label class="check-row">
+            <input id="commanderOnlyInput" name="commander_only" type="checkbox" checked />
+            Commander decks uniquement
+          </label>
+          <label class="check-row">
+            <input id="hideCollectorInput" name="hide_collector" type="checkbox" />
+            Cacher les versions Collector
+          </label>
+          <label>
+            Trier les decks
+            <select id="deckSortInput" name="sort">
+              <option value="release_desc" selected>Date de sortie recente</option>
+              <option value="release_asc">Date de sortie ancienne</option>
+              <option value="extension">Extension / code</option>
+              <option value="name">Nom</option>
+            </select>
+          </label>
+          <button type="submit" class="primary">Chercher des precons MTGJSON</button>
+        </form>
+        <div class="notice">
+          Les imports de decks utilisent MTGJSON: les cartes importees correspondent aux versions exactes du produit quand MTGJSON fournit un identifiant Scryfall.
+        </div>
+        <div class="panel preload-panel">
+          <h2>Prix des precons Commander</h2>
+          <p class="muted">Precharge les prix MTGJSON des cartes presentes dans les decks Commander pour accelerer les fiches deck.</p>
+          <button class="secondary full" id="preloadCommanderPrices">Precharger les prix Commander</button>
+          <div id="preloadStatus" class="helper-text">Statut: non lance.</div>
+        </div>
+        <div id="deckPreview"></div>
+        <div id="deckResults" class="deck-list"></div>
+      </section>
+
+      <section class="screen" id="screen-prices">
+        <div class="panel">
+          <div class="detail-header">
+            <button class="icon-button" id="backFromCard" type="button" aria-label="Retour a l'ecran precedent">←</button>
+            <h2>Fiche carte</h2>
+          </div>
+          <p class="muted">
+            Touche une carte dans la recherche ou la collection pour afficher ses details Scryfall, rulings et tendances de prix.
+          </p>
+          <div id="priceDetails"></div>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast" role="status" aria-live="polite"></div>
+    <script src="/app.js?v=deck-sort-v13" type="module"></script>
+  </body>
+</html>
