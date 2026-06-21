@@ -2,7 +2,14 @@
 
 PWA mobile-first pour gérer une collection Magic: The Gathering : recherche Scryfall, suivi des prix EUR, historique local et import de decks preconstruits MTGJSON.
 
-Extrait du projet [mtg_project](https://github.com/Guillaume-Jolly/mtg_project) (branche `cursor/spec-etat-lieux-ed2f`).
+**Dépôt :** [github.com/Guillaume-Jolly/MTG-Collection-Tracker](https://github.com/Guillaume-Jolly/MTG-Collection-Tracker)
+
+## Installation
+
+```bash
+git clone https://github.com/Guillaume-Jolly/MTG-Collection-Tracker.git
+cd MTG-Collection-Tracker
+```
 
 ## Fonctionnalités
 
@@ -57,3 +64,7 @@ python -m unittest discover -s tests
 ## Dépendances
 
 Python 3.11+ (stdlib uniquement, pas de packages externes requis).
+
+## Contribution
+
+Issues, pull requests et discussions : [MTG-Collection-Tracker sur GitHub](https://github.com/Guillaume-Jolly/MTG-Collection-Tracker).
