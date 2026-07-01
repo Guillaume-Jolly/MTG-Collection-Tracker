@@ -33,6 +33,50 @@
 **Validations :** ⚠️ _…_
 **Risques :** ⚠️ _…_
 
+### X=3 — 2026-07-01 — ⚠️ À COMPLÉTER
+
+**But du prompt :** ⚠️ _(à compléter — relire le message user de ce prompt)_
+
+| Y | Résumé | Commit | Label UI |
+|---|--------|--------|----------|
+| 0 | `version:prompt` | *(non commité)* | `v1.2.0.03` |
+
+**Validations :** ⚠️ _…_
+**Risques :** ⚠️ _…_
+
+### X=4 — 2026-07-01 — ⚠️ À COMPLÉTER
+
+**But du prompt :** ⚠️ _(à compléter — relire le message user de ce prompt)_
+
+| Y | Résumé | Commit | Label UI |
+|---|--------|--------|----------|
+| 0 | `version:prompt` | *(non commité)* | `v1.2.0.04` |
+
+**Validations :** ⚠️ _…_
+**Risques :** ⚠️ _…_
+
+### X=5 — 2026-07-01 — ⚠️ À COMPLÉTER
+
+**But du prompt :** ⚠️ _(à compléter — relire le message user de ce prompt)_
+
+| Y | Résumé | Commit | Label UI |
+|---|--------|--------|----------|
+| 0 | `version:prompt` | *(non commité)* | `v1.3.0.05` |
+
+**Validations :** ⚠️ _…_
+**Risques :** ⚠️ _…_
+
+### X=6 — 2026-07-01 — ⚠️ À COMPLÉTER
+
+**But du prompt :** ⚠️ _(à compléter — relire le message user de ce prompt)_
+
+| Y | Résumé | Commit | Label UI |
+|---|--------|--------|----------|
+| 0 | `version:prompt` | *(non commité)* | `v1.3.0.06` |
+
+**Validations :** ⚠️ _…_
+**Risques :** ⚠️ _…_
+
 ## Historique complété
 
 _(sections X finalisées)_

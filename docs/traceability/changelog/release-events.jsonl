@@ -1,3 +1,4 @@
 {"at":"2026-07-01T11:12:10.954Z","segment":"A","trigger":"mep","before":"0.1.16","after":"1.0.0"}
 {"at":"2026-07-01T11:13:00.000Z","segment":"B","trigger":"kickoff-phase-1.1","before":"1.0.0","after":"1.1.0"}
 {"at":"2026-07-01T11:22:04.856Z","segment":"B","trigger":"main-push","before":"1.1.0","after":"1.2.0"}
+{"at":"2026-07-01T11:34:42.325Z","segment":"B","trigger":"main-push","before":"1.2.0","after":"1.3.0"}
