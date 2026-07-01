@@ -9,13 +9,17 @@ from mtg_pwa.version import app_version_label, format_session_label, package_sem
 
 class AppVersionTest(unittest.TestCase):
     def test_package_semver(self) -> None:
-        self.assertEqual(package_semver(), "1.1.0")
+        root = Path(__file__).resolve().parents[1]
+        pkg = json.loads((root / "package.json").read_text(encoding="utf-8"))
+        self.assertEqual(package_semver(), str(pkg["version"]))
 
     def test_format_session_label_without_y(self) -> None:
-        self.assertEqual(format_session_label("1.1.0", 5, 0), "v1.1.0.05")
+        semver = package_semver()
+        self.assertEqual(format_session_label(semver, 5, 0), f"v{semver}.05")
 
     def test_format_session_label_with_y(self) -> None:
-        self.assertEqual(format_session_label("1.1.0", 5, 3), "v1.1.0.05.3")
+        semver = package_semver()
+        self.assertEqual(format_session_label(semver, 5, 3), f"v{semver}.05.3")
 
     def test_app_version_label_reads_build_revision(self) -> None:
         root = Path(__file__).resolve().parents[1]

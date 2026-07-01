@@ -65,7 +65,6 @@ class SharedCatalogTest(unittest.TestCase):
                     (card["id"],),
                 ).fetchone()
                 prod_conn.close()
-                dev_conn.close()
             finally:
                 os.environ.pop("MTG_PWA_PRICES_DB", None)
 

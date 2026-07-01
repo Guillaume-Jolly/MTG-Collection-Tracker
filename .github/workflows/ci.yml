@@ -14,11 +14,11 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: npm
+          node-version: '22'
 
-      - name: Install
-        run: npm ci
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
       - name: Install git hooks path (validate stack)
         run: npm run hooks:install
@@ -26,11 +26,8 @@ jobs:
       - name: Validate infra stack
         run: npm run validate:stack
 
-      # Scripts validate:* spécifiques projet — voir REFERENCE/projects/{projet}.md
-      # Exemple IDLE (décommenter / adapter) :
-      # - run: npm run validate:companion-bonds
-      # - run: npm run validate:link-corpus
-
-      - name: Build
+      - name: Sync build-info
         run: npm run build
-        continue-on-error: false
+
+      - name: Python unit tests
+        run: python -m unittest discover -s tests -q

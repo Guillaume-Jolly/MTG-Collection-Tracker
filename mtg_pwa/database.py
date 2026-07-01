@@ -222,8 +222,23 @@ def init_db(conn: sqlite3.Connection) -> None:
 
 
 def ensure_cardmarket_schema(conn: sqlite3.Connection) -> None:
+    shared_catalog = uses_shared_catalog()
     map_table = catalog_table("cardmarket_product_map")
     guide_table = catalog_table("cardmarket_price_guide_daily")
+    index_sql = (
+        ""
+        if shared_catalog
+        else f"""
+        CREATE INDEX IF NOT EXISTS idx_cm_guide_product_date
+            ON {guide_table}(id_product, snapshot_date);
+        CREATE INDEX IF NOT EXISTS idx_cm_guide_snapshot_date
+            ON {guide_table}(snapshot_date);
+        CREATE INDEX IF NOT EXISTS idx_cm_map_scryfall
+            ON {map_table}(scryfall_id);
+        CREATE INDEX IF NOT EXISTS idx_cm_map_set_code
+            ON {map_table}(set_code);
+        """
+    )
     conn.executescript(
         f"""
         CREATE TABLE IF NOT EXISTS {map_table} (
@@ -254,20 +269,15 @@ def ensure_cardmarket_schema(conn: sqlite3.Connection) -> None:
             collected_at TEXT NOT NULL,
             PRIMARY KEY (id_product, snapshot_date)
         );
-
-        CREATE INDEX IF NOT EXISTS idx_cm_guide_product_date
-            ON {guide_table}(id_product, snapshot_date);
-        CREATE INDEX IF NOT EXISTS idx_cm_guide_snapshot_date
-            ON {guide_table}(snapshot_date);
-        CREATE INDEX IF NOT EXISTS idx_cm_map_scryfall
-            ON {map_table}(scryfall_id);
-        CREATE INDEX IF NOT EXISTS idx_cm_map_set_code
-            ON {map_table}(set_code);
+        {index_sql}
         """
     )
 
 
 def ensure_catalog_indexes(conn: sqlite3.Connection) -> None:
+    if uses_shared_catalog():
+        # Index created when the shared prices DB is initialized standalone.
+        return
     cards_table = catalog_table("cards")
     snapshots_table = catalog_table("price_snapshots")
     conn.execute(f"CREATE INDEX IF NOT EXISTS idx_cards_set_code ON {cards_table}(set_code)")
