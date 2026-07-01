@@ -1,0 +1,40 @@
+---
+description: Bump X (version:prompt) en premier sur tout prompt de travail
+alwaysApply: true
+---
+
+# Version X — premier réflexe
+
+## Automatisation
+
+Un **hook Cursor** (`beforeSubmitPrompt`) exécute `npm run version:prompt` à chaque message user, sauf **`même X`** / **`same X`**.
+
+Un **hook `stop`** exécute `npm run version:task` si le worktree a changé en fin de tour, sauf **`même Y`** / **`same Y`**.
+
+L’agent **ne doit pas** compter sur sa mémoire seule : les hooks garantissent X et Y.
+
+## Règle agent (backup si hook désactivé)
+
+1. **Premier appel shell** du tour → `npm run version:prompt`, sauf opt-out explicite user (`même X`).
+2. **Fin de tâche distincte** → `npm run version:task` + ligne Y dans le DEV_LOG (`version.config.json` → `devLogRelativePath`).
+3. **Fin de prompt** → compléter la section DEV_LOG (titre, but, validations) ; déplacer vers Historique si terminé.
+4. **Commits** → relire DEV_LOG : **1 ligne Y ≈ 1 commit atomique** (`git add` ciblé, message = résumé Y).
+
+## Ce qui n’est PAS un bump X
+
+- Clarification dans le **même** fil de travail → user peut écrire `même X`.
+- Relire / expliquer sans nouveau travail → user peut écrire `même X`.
+
+## Y (sous-révision)
+
+- **Hook `stop`** → `version:task` si fichiers modifiés (opt-out `même Y`)
+- **`npm run version:task`** manuel entre lots distincts dans le même tour
+- Pas le HMR Vite (Y agent ≠ sauvegarde dev)
+
+## Fichiers
+
+| Fichier | Rôle |
+|---------|------|
+| `build-revision.json` | X/Y versionnés git |
+| `public/build-info.json` | Miroir runtime (gitignoré) |
+| DEV_LOG (voir `version.config.json`) | Une section par X ; ⚠️ = à compléter |

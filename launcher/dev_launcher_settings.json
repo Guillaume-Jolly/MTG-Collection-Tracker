@@ -1,0 +1,7 @@
+{
+  "port": 8000,
+  "open_browser": true,
+  "run_warmup": false,
+  "host": "127.0.0.1",
+  "browser": "brave"
+}

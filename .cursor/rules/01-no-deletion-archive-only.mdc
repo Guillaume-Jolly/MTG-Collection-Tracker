@@ -1,0 +1,50 @@
+---
+description: Jamais de suppression — uniquement déplacer vers dossiers gitignorés (purge manuelle user)
+alwaysApply: true
+---
+
+# Aucune suppression — déplacer vers gitignore uniquement
+
+## Règle absolue
+
+**Ne jamais supprimer définitivement** un fichier ou dossier du disque — ni versionné, ni gitignoré, ni « obsolète ».
+
+**Interdit :** `Remove-Item`, `rm -rf`, `git clean`, `Delete` tool, vider un dossier d’archive, `git rm` sans accord explicite fichier par fichier.
+
+## Seule action autorisée pour « retirer » du projet
+
+**Déplacer** (`git mv`, `mv`, `Move-Item`) vers un dossier **gitignoré** :
+
+| Destination type | Exemples |
+|------------------|------------------------|
+| Archive locale gitignorée | `old_assets/`, `old_v2.1/`, **`old_{A}_{B}/`** (ex. `old_2_2/`), `archive/YYYY-MM-DD-<motif>/` |
+| Drops / temp gitignorés | `Input chatgpt/`, `.tmp/` |
+| Stack locale | `deploy/` (gitignoré) |
+
+Le chemin cible **doit être dans `.gitignore`** (ou devenir gitignoré avant le move).
+
+## Qui purge ?
+
+- **Agent / scripts : jamais.** Pas de vidage de `old_*`, `archive/`, etc.
+- **Guillaume seul :** nettoyage manuel des dossiers gitignorés, ou copie/déplacement vers **un autre disque (DD)**.
+
+Les dossiers gitignorés **restent sur disque** jusqu’à action manuelle user.
+
+## Fichiers versionnés (git)
+
+1. **`git mv`** vers zone gitignorée — le fichier **reste sur disque**, sort du suivi git si le dossier est ignoré.
+2. Documenter le move dans un **manifeste cleanup** si lot significatif.
+3. Pas de commit qui **efface** des assets utiles sans revue user.
+
+## Fichiers non versionnés
+
+- **`mv` / `Move-Item`** vers dossier gitignoré uniquement.
+
+## Code source
+
+- Commenter le mort plutôt que retirer, sauf demande explicite.
+- « Nettoyer » = trier, documenter, **déplacer vers gitignore** — pas supprimer.
+
+## Vrai retrait du disque
+
+Uniquement si Guillaume demande **explicitement** fichier par fichier — proposer d’abord un **move gitignoré** ; la purge disque reste **humaine**.

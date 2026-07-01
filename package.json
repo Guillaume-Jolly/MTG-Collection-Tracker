@@ -1,0 +1,20 @@
+{
+  "name": "mtg-tracker",
+  "version": "1.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MTG Price Tracker — PWA collection & market",
+  "scripts": {
+    "version:prompt": "node scripts/bump-prompt.mjs",
+    "version:task": "node scripts/bump-task.mjs",
+    "version:branch-push": "node scripts/bump-branch-push.mjs",
+    "version:main-push": "node scripts/bump-main-push.mjs",
+    "version:mep": "node scripts/bump-mep.mjs",
+    "hooks:install": "node scripts/hooks-install.mjs",
+    "dev:launcher": "node scripts/dev-launcher/server.mjs",
+    "validate:stack": "node scripts/validate-stack.mjs",
+    "version:sync": "node scripts/sync-build-info.mjs",
+    "dev:server": "python run_mvp.py",
+    "build": "node scripts/sync-build-info.mjs"
+  }
+}

@@ -6,60 +6,125 @@
     <meta name="theme-color" content="#171224" />
     <title>MTG Price Tracker</title>
     <link rel="manifest" href="/manifest.json" />
-    <link rel="stylesheet" href="/styles.css?v=collection-grid-v27" />
+    <link rel="stylesheet" href="/styles.css?v=detail-printing-click-v1" />
+    <script src="/version.js"></script>
   </head>
   <body>
+    <div id="startupSplash" class="startup-splash hidden" role="dialog" aria-modal="true" aria-labelledby="startupSplashTitle" aria-live="polite">
+      <div class="startup-splash-backdrop" aria-hidden="true">
+        <img id="startupSplashImage" class="startup-splash-image" src="/splash/splash-1.png" alt="" />
+        <div class="startup-splash-vignette"></div>
+      </div>
+      <div class="startup-splash-panel">
+        <p class="eyebrow">MTG Price Tracker <span id="startupSplashVersion" class="startup-splash-version"></span></p>
+        <h2 id="startupSplashTitle">Preparation de l'arène...</h2>
+        <p id="startupSplashMessage" class="helper-text">Connexion aux archives de prix</p>
+        <div class="startup-splash-progress" aria-hidden="true">
+          <div id="startupSplashProgressBar" class="startup-splash-progress-bar"></div>
+        </div>
+        <span id="startupSplashPercent" class="startup-splash-percent">0%</span>
+      </div>
+    </div>
+    <div id="priceArchiveBanner" class="price-archive-banner hidden" role="status" aria-live="polite" aria-atomic="true">
+      <div class="price-archive-banner-inner">
+        <div class="price-archive-banner-copy">
+          <strong id="priceArchiveTitle">Archivage des prix MTGJSON</strong>
+          <p id="priceArchiveMessage" class="helper-text">Preparation...</p>
+        </div>
+        <div class="price-archive-progress" aria-hidden="true">
+          <div id="priceArchiveProgressBar" class="price-archive-progress-bar"></div>
+        </div>
+        <span id="priceArchivePercent" class="price-archive-percent">0%</span>
+      </div>
+    </div>
     <header class="app-header">
-      <div>
+      <div class="header-brand">
+        <span id="appVersion" class="app-version" aria-label="Version application"></span>
+        <script>
+          document.getElementById("appVersion").textContent = window.MTG_APP_VERSION || "";
+        </script>
+        <div class="header-lang-switch" id="globalDisplayLang" role="group" aria-label="Langue d'affichage">
+          <button type="button" class="header-lang-btn" data-display-lang="fr" aria-pressed="false">FR</button>
+          <button type="button" class="header-lang-btn" data-display-lang="en" aria-pressed="false">EN</button>
+          <button type="button" class="header-lang-btn" data-display-lang="merge" aria-pressed="false">FR puis EN</button>
+        </div>
         <p class="eyebrow">MVP PWA</p>
         <h1>MTG Price Tracker</h1>
       </div>
-      <div class="total-pill" id="headerTotal">0,00 EUR</div>
+      <div class="header-stats" id="headerStats">
+        <div class="header-stat" title="Exemplaires possedes (quantites additionnees)">
+          <span class="header-stat-label">Total</span>
+          <strong id="headerTotalCards">0</strong>
+        </div>
+        <div class="header-stat" title="Cartes uniques (meme oracle)">
+          <span class="header-stat-label">Uniques</span>
+          <strong id="headerUniqueCards">0</strong>
+        </div>
+        <div class="header-stat" title="Illustrations / editions distinctes">
+          <span class="header-stat-label">Splash</span>
+          <strong id="headerUniqueSplash">0</strong>
+        </div>
+        <div class="header-stat header-stat-value" title="Valeur avec toutes les copies / sans compter les exemplaires en double">
+          <span class="header-stat-label">Valeur</span>
+          <strong id="headerTotalValue">0,00 €</strong>
+          <span class="header-stat-sub" id="headerUniqueValue">0,00 €</span>
+        </div>
+      </div>
     </header>
 
     <nav class="tabs" aria-label="Navigation principale">
       <button class="tab active" data-tab="search">Recherche</button>
-      <button class="tab" data-tab="collection">Collection</button>
+      <button class="tab" data-tab="my-collection">Ma collection</button>
+      <button class="tab" data-tab="collection">Extensions</button>
       <button class="tab" data-tab="decks">Decks</button>
+      <button class="tab" data-tab="market">Market</button>
       <button class="tab" data-tab="prices">Fiche</button>
     </nav>
 
+    <div class="app-display-bar" id="appDisplayBar">
+      <label class="display-zoom-control" for="globalDisplayZoomInput">
+        <span>Zoom</span>
+        <input
+          id="globalDisplayZoomInput"
+          type="range"
+          min="50"
+          max="480"
+          step="1"
+          value="200"
+          aria-label="Zoom affichage"
+        />
+      </label>
+    </div>
+
+    <details class="card-search-panel" id="cardSearchPanel">
+      <summary>Rechercher une carte</summary>
+      <form class="search-form" id="searchForm">
+        <label>
+          Carte
+          <input id="searchInput" name="q" type="search" autocomplete="off" placeholder="Ex: Lightning Bolt" required />
+        </label>
+        <div class="form-row">
+          <label>
+            Prix
+            <select id="finishInput" name="finish">
+              <option value="nonfoil" selected>Nonfoil</option>
+              <option value="foil">Foil</option>
+              <option value="etched">Etched</option>
+            </select>
+          </label>
+        </div>
+        <label class="check-row">
+          <input id="serializedInput" name="serialized" type="checkbox" />
+          Chercher uniquement les versions serialized
+        </label>
+        <p class="helper-text">Si cochee, la recherche ignore la langue pour retrouver les serialized anglaises.</p>
+        <button type="submit" class="primary">Chercher sur Scryfall</button>
+      </form>
+    </details>
+
     <main>
       <section class="screen active" id="screen-search">
-        <form class="search-form" id="searchForm">
-          <label>
-            Carte
-            <input id="searchInput" name="q" type="search" autocomplete="off" placeholder="Ex: Lightning Bolt" required />
-          </label>
-          <div class="form-row">
-            <label>
-              Langue
-              <select id="langInput" name="lang">
-                <option value="fr" selected>FR</option>
-                <option value="en">EN</option>
-                <option value="all">Toutes</option>
-              </select>
-            </label>
-            <label>
-              Prix
-              <select id="finishInput" name="finish">
-                <option value="nonfoil" selected>Nonfoil</option>
-                <option value="foil">Foil</option>
-                <option value="etched">Etched</option>
-              </select>
-            </label>
-          </div>
-          <label class="check-row">
-            <input id="serializedInput" name="serialized" type="checkbox" />
-            Chercher uniquement les versions serialized
-          </label>
-          <p class="helper-text">Si cochee, la recherche ignore la langue pour retrouver les serialized anglaises.</p>
-          <button type="submit" class="primary">Chercher sur Scryfall</button>
-        </form>
-        <div class="notice">
-          Prix EUR prioritaire: champs Scryfall <code>eur</code>, <code>eur_foil</code>, <code>eur_etched</code>, utilises comme prix Cardmarket indicatifs.
-        </div>
-        <div id="searchResults" class="cards-grid"></div>
+        <div id="searchResults" class="catalog-card-grid"></div>
       </section>
 
       <section class="screen" id="screen-collection">
@@ -73,6 +138,14 @@
         <div id="collectionBlocksView"></div>
         <div class="hidden" id="collectionSetView"></div>
         <div class="hidden" id="collectionCardsView"></div>
+      </section>
+
+      <section class="screen" id="screen-my-collection">
+        <div id="myCollectionView"></div>
+      </section>
+
+      <section class="screen" id="screen-market">
+        <div id="marketView"></div>
       </section>
 
       <div class="collection-price-overlay hidden" id="collectionPriceProgress" aria-live="polite" role="status">
@@ -133,6 +206,10 @@
           <p class="muted">Precharge les prix MTGJSON des cartes presentes dans les decks Commander.</p>
           <button class="secondary full" id="preloadCommanderPrices">Precharger les prix Commander</button>
           <div id="preloadStatus" class="helper-text">Statut: non lance.</div>
+          <hr class="deck-menu-divider" />
+          <p class="muted">Archive quotidienne des prix MTGJSON (AllPricesToday) pour construire un historique long terme.</p>
+          <button class="secondary full" id="archiveDailyPrices">Archiver les prix du jour</button>
+          <div id="priceArchiveStatus" class="helper-text">Dernier archivage: inconnu.</div>
         </div>
 
         <div class="deck-list-meta" id="deckListMeta"></div>
@@ -146,6 +223,11 @@
           <div class="detail-header">
             <button class="icon-button" id="backFromCard" type="button" aria-label="Retour a l'ecran precedent">←</button>
             <h2>Fiche carte</h2>
+            <div class="detail-nav hidden" id="cardDetailNav">
+              <button class="icon-button" id="prevCard" type="button" aria-label="Carte precedente">&#8249;</button>
+              <span class="detail-nav-label" id="cardDetailNavLabel"></span>
+              <button class="icon-button" id="nextCard" type="button" aria-label="Carte suivante">&#8250;</button>
+            </div>
           </div>
           <p class="muted">
             Touche une carte dans la recherche ou la collection pour afficher ses details Scryfall, rulings et tendances de prix.
@@ -156,6 +238,6 @@
     </main>
 
     <div id="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js?v=collection-grid-v27" type="module"></script>
+    <script src="/app.js?v=detail-printing-click-v1" type="module"></script>
   </body>
 </html>

@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dev Launcher</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0f1218;
+        --panel: #171c26;
+        --line: rgba(255, 255, 255, 0.1);
+        --text: #eef2ff;
+        --muted: rgba(238, 242, 255, 0.68);
+        --accent: #7eb8ff;
+        --warn: #f0b429;
+        --danger: #ef6b6b;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: 'Segoe UI', system-ui, sans-serif;
+        background:
+          radial-gradient(circle at 10% 0%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 34%),
+          var(--bg);
+        color: var(--text);
+      }
+
+      .wrap { max-width: 1100px; margin: 0 auto; padding: 1.25rem; display: grid; gap: 1rem; }
+
+      header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem; }
+      h1 { margin: 0; font-size: 1.35rem; }
+      .subtitle { margin: 0.2rem 0 0; color: var(--muted); font-size: 0.92rem; }
+
+      .status-pill {
+        display: inline-flex; align-items: center; gap: 0.45rem;
+        padding: 0.35rem 0.75rem; border-radius: 999px;
+        border: 1px solid var(--line); background: rgba(255,255,255,0.04);
+        font-size: 0.88rem; font-weight: 600;
+      }
+
+      .dot { width: 0.55rem; height: 0.55rem; border-radius: 999px; background: var(--muted); }
+      .status-running .dot { background: var(--accent); box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 55%, transparent); }
+      .status-starting .dot { background: var(--warn); }
+      .status-crashed .dot, .status-stopped .dot { background: var(--danger); }
+
+      .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+      @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+
+      .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 1rem; }
+      .panel h2 { margin: 0 0 0.75rem; font-size: 0.95rem; letter-spacing: 0.03em; text-transform: uppercase; color: var(--muted); }
+
+      .kv { display: grid; gap: 0.55rem; }
+      .kv-row { display: flex; justify-content: space-between; gap: 1rem; font-size: 0.92rem; }
+      .kv-row span:first-child { color: var(--muted); }
+      .version-label { font-size: 1.35rem; font-weight: 700; color: color-mix(in srgb, var(--accent) 70%, white); }
+
+      .actions { display: flex; flex-wrap: wrap; gap: 0.55rem; }
+      button {
+        border: 1px solid var(--line); background: rgba(255,255,255,0.05); color: var(--text);
+        border-radius: 10px; padding: 0.55rem 0.85rem; font-size: 0.88rem; cursor: pointer;
+      }
+      button:hover { background: rgba(255,255,255,0.1); }
+      button.primary { background: color-mix(in srgb, var(--accent) 18%, transparent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+      button.danger { background: rgba(239,107,107,0.12); border-color: rgba(239,107,107,0.35); }
+      button.hidden { display: none; }
+
+      .url-box {
+        margin-top: 0.75rem; padding: 0.65rem 0.75rem; border-radius: 10px;
+        background: rgba(0,0,0,0.25); border: 1px dashed var(--line);
+        font-family: Consolas, monospace; font-size: 0.85rem; word-break: break-all;
+      }
+
+      .logs {
+        margin: 0; height: 360px; overflow: auto; padding: 0.75rem; border-radius: 10px;
+        background: rgba(0,0,0,0.35); border: 1px solid var(--line);
+        font-family: Consolas, monospace; font-size: 0.78rem; line-height: 1.45; white-space: pre-wrap;
+      }
+
+      .hint { margin: 0; color: var(--muted); font-size: 0.82rem; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <div>
+          <h1 id="title">Dev Launcher</h1>
+          <p class="subtitle" id="subtitle">Serveur dev local + monitoring</p>
+        </div>
+        <div class="status-pill" id="status-pill">
+          <span class="dot"></span>
+          <span id="status-text">Initialisation…</span>
+        </div>
+      </header>
+
+      <div class="grid">
+        <section class="panel">
+          <h2>Version & build</h2>
+          <div class="version-label" id="version-label">—</div>
+          <div class="kv" style="margin-top: 0.75rem">
+            <div class="kv-row"><span>Semver package</span><strong id="pkg-version">—</strong></div>
+            <div class="kv-row"><span>Commit</span><strong id="commit">—</strong></div>
+            <div class="kv-row"><span>Branche</span><strong id="branch">—</strong></div>
+            <div class="kv-row"><span>Arbre git</span><strong id="dirty">—</strong></div>
+            <div class="kv-row"><span>Dernière révision</span><strong id="revision-at">—</strong></div>
+            <div class="kv-row"><span>Build live</span><strong id="built-at">—</strong></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Serveur</h2>
+          <div class="kv">
+            <div class="kv-row"><span>État</span><strong id="dev-status">—</strong></div>
+            <div class="kv-row"><span>Uptime</span><strong id="uptime">—</strong></div>
+            <div class="kv-row"><span>PID</span><strong id="pid">—</strong></div>
+            <div class="kv-row"><span>Port dev</span><strong id="dev-port">—</strong></div>
+            <div class="kv-row"><span>Build en cours</span><strong id="build-running">—</strong></div>
+          </div>
+          <div class="url-box" id="app-url">—</div>
+          <div class="actions" style="margin-top: 0.85rem">
+            <button class="primary" id="btn-open-app" type="button">Ouvrir l'app</button>
+            <button id="btn-restart" type="button">Redémarrer dev</button>
+            <button id="btn-restart-launcher" type="button">Redémarrer lanceur</button>
+            <button id="btn-stop" class="danger" type="button">Arrêter dev</button>
+            <button id="btn-build" type="button">npm run build</button>
+            <button id="btn-version-prompt" type="button">version:prompt</button>
+            <button id="btn-sync-build-info" type="button">Sync build-info</button>
+            <button id="btn-open-repo" type="button">Ouvrir dossier</button>
+            <button id="btn-copy-url" type="button">Copier URL</button>
+          </div>
+          <p class="hint" style="margin-top: 0.75rem">
+            Dashboard sur port configurable (<code>dev-launcher.config.json</code>).
+            Fermez la console pour tout arrêter.
+          </p>
+        </section>
+      </div>
+
+      <section class="panel">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:0.75rem;margin-bottom:0.75rem">
+          <h2 style="margin:0">Logs</h2>
+          <button id="btn-clear-logs" type="button">Vider</button>
+        </div>
+        <pre class="logs" id="logs"></pre>
+      </section>
+    </div>
+
+    <script>
+      const statusLabels = {
+        starting: 'Démarrage…',
+        running: 'En ligne',
+        stopping: 'Arrêt…',
+        stopped: 'Arrêté',
+        crashed: 'Erreur',
+      }
+
+      function formatUptime(ms) {
+        if (!ms || ms < 1000) return '—'
+        const sec = Math.floor(ms / 1000)
+        const h = Math.floor(sec / 3600)
+        const m = Math.floor((sec % 3600) / 60)
+        const s = sec % 60
+        if (h > 0) return `${h}h ${m}m ${s}s`
+        if (m > 0) return `${m}m ${s}s`
+        return `${s}s`
+      }
+
+      function formatDate(iso) {
+        if (!iso) return '—'
+        try { return new Date(iso).toLocaleString('fr-FR') } catch { return iso }
+      }
+
+      async function post(path) {
+        await fetch(path, { method: 'POST' })
+        await refresh()
+      }
+
+      function toggle(btn, visible) {
+        btn.classList.toggle('hidden', !visible)
+      }
+
+      async function refresh() {
+        const [statusRes, logsRes] = await Promise.all([
+          fetch('/api/status', { cache: 'no-store' }),
+          fetch('/api/logs', { cache: 'no-store' }),
+        ])
+        const status = await statusRes.json()
+        const logs = await logsRes.json()
+
+        if (status.accentColor) {
+          document.documentElement.style.setProperty('--accent', status.accentColor)
+        }
+
+        document.getElementById('title').textContent = `${status.projectLabel ?? 'Projet'} — Dev Launcher`
+        document.getElementById('subtitle').textContent = `npm run ${status.config?.devScript ?? 'dev'} · port ${status.config?.devPort ?? '?'}`
+
+        const pill = document.getElementById('status-pill')
+        pill.className = `status-pill status-${status.devStatus}`
+        document.getElementById('status-text').textContent = statusLabels[status.devStatus] ?? status.devStatus
+        document.getElementById('dev-status').textContent = statusLabels[status.devStatus] ?? status.devStatus
+        document.getElementById('uptime').textContent = formatUptime(status.uptimeMs)
+        document.getElementById('pid').textContent = status.pid ?? '—'
+        document.getElementById('dev-port').textContent = status.config?.devPort ?? '—'
+        document.getElementById('build-running').textContent = status.buildRunning ? 'Oui' : 'Non'
+        document.getElementById('app-url').textContent = status.gameUrl
+        document.getElementById('pkg-version').textContent = status.packageVersion ?? '—'
+        document.getElementById('branch').textContent = status.branch ?? '—'
+        document.getElementById('commit').textContent = status.commit ?? '—'
+        document.getElementById('dirty').textContent = status.dirty ? 'Modifications locales' : 'Propre'
+        document.getElementById('revision-at').textContent = formatDate(status.revisionUpdatedAt)
+
+        const info = status.buildInfo ?? {}
+        document.getElementById('version-label').textContent = info.versionLabel ?? '—'
+        document.getElementById('built-at').textContent = formatDate(info.builtAt)
+
+        toggle(document.getElementById('btn-build'), status.capabilities?.build)
+        toggle(document.getElementById('btn-version-prompt'), status.capabilities?.versionPrompt)
+
+        const logsEl = document.getElementById('logs')
+        logsEl.textContent = (logs.lines ?? []).join('\n')
+        logsEl.scrollTop = logsEl.scrollHeight
+      }
+
+      document.getElementById('btn-open-app').addEventListener('click', () => post('/api/open-app'))
+      document.getElementById('btn-restart').addEventListener('click', () => post('/api/restart'))
+      document.getElementById('btn-restart-launcher').addEventListener('click', async () => {
+        if (!window.confirm('Redémarrer le lanceur ? Le serveur dev reste actif.')) return
+        await fetch('/api/restart-launcher', { method: 'POST' })
+        setTimeout(refresh, 1200)
+      })
+      document.getElementById('btn-stop').addEventListener('click', () => post('/api/stop'))
+      document.getElementById('btn-build').addEventListener('click', () => post('/api/build'))
+      document.getElementById('btn-version-prompt').addEventListener('click', () => post('/api/version-prompt'))
+      document.getElementById('btn-sync-build-info').addEventListener('click', () => post('/api/sync-build-info'))
+      document.getElementById('btn-open-repo').addEventListener('click', () => post('/api/open-repo'))
+      document.getElementById('btn-clear-logs').addEventListener('click', () => post('/api/clear-logs'))
+      document.getElementById('btn-copy-url').addEventListener('click', async () => {
+        const url = document.getElementById('app-url').textContent
+        try { await navigator.clipboard.writeText(url) } catch { window.prompt('Copier URL :', url) }
+      })
+
+      refresh()
+      setInterval(refresh, 2000)
+    </script>
+  </body>
+</html>

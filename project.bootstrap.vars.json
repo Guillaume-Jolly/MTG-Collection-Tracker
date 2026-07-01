@@ -1,0 +1,16 @@
+{
+  "projectPath": "C:\\Dev\\Project\\MTG TRACKER",
+  "projectName": "mtg-tracker",
+  "projectLabel": "MTG Tracker",
+  "semver": "1.1.0",
+  "gitBranch": "main",
+  "devLogRelativePath": "docs/traceability/changelog/DEV_LOG_0_1.md",
+  "versionIndexRelativePath": "docs/traceability/changelog/VERSION-INDEX.md",
+  "releaseEventsRelativePath": "docs/traceability/changelog/release-events.jsonl",
+  "gitignoreArchiveDirs": ["old_assets/", "old_0_1/", "archive/"],
+  "referenceImplementationPath": "C:\\Dev\\Project\\REFERENCE",
+  "validateScripts": [
+    "npm run build",
+    "python -m unittest discover -s tests -q"
+  ]
+}

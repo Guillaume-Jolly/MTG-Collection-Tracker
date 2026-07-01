@@ -5,16 +5,17 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from .local_cache import load_deck, load_deck_list, load_set_list
+from .local_cache import load_deck, load_deck_list, load_set_list, deck_json_path
 
 
 MTGJSON_BASE_URL = "https://mtgjson.com/api/v5"
 ALL_PRICES_GZ_URL = f"{MTGJSON_BASE_URL}/AllPrices.json.gz"
+ALL_PRICES_TODAY_GZ_URL = f"{MTGJSON_BASE_URL}/AllPricesToday.json.gz"
 DECK_LIST_GZ_URL = f"{MTGJSON_BASE_URL}/DeckList.json.gz"
 USER_AGENT = "mtg-project-pwa/0.1"
 FINISH_TO_MTGJSON = {
@@ -185,8 +186,70 @@ def sort_decks(decks: list[dict[str, Any]], sort: str) -> list[dict[str, Any]]:
     return sorted(decks, key=lambda deck: (deck.get("releaseDate") or "", deck.get("name") or ""), reverse=True)
 
 
+def deck_owned_status(conn, file_name: str, deck: dict[str, Any]) -> dict[str, Any]:
+    from .database import is_deck_owned, owned_counts_by_card_finish
+
+    deck_cards = importable_deck_cards(deck)
+    total_cards = sum(card["quantity"] for card in deck_cards)
+    explicit = is_deck_owned(conn, file_name)
+    if not deck_cards:
+        return {
+            "owned": explicit,
+            "owned_source": "manual" if explicit else "none",
+            "collected_cards": 0,
+            "total_cards": 0,
+        }
+
+    owned = owned_counts_by_card_finish(conn)
+    collected_cards = 0
+    fully_collected = True
+    for card in deck_cards:
+        have = owned.get((card["scryfall_id"], card["finish"]), 0)
+        if have < card["quantity"]:
+            fully_collected = False
+        collected_cards += min(have, card["quantity"])
+
+    if explicit:
+        source = "manual"
+    elif fully_collected:
+        source = "collection"
+    else:
+        source = "none"
+
+    return {
+        "owned": explicit,
+        "fully_collected": fully_collected,
+        "owned_source": source,
+        "collected_cards": collected_cards,
+        "total_cards": total_cards,
+    }
+
+
 def fetch_deck(file_name: str) -> dict[str, Any]:
     return load_deck(file_name)
+
+
+def deck_file_in_catalog(file_name: str) -> bool:
+    if deck_json_path(file_name).exists():
+        return True
+    return any(deck.get("fileName") == file_name for deck in load_deck_list())
+
+
+def deck_thumbnail_info(deck: dict[str, Any]) -> dict[str, Any] | None:
+    from .local_cache import catalog_image_url
+
+    for section in ("commander", "mainBoard"):
+        for card in deck.get(section) or []:
+            scryfall_id = (card.get("identifiers") or {}).get("scryfallId")
+            if not scryfall_id:
+                continue
+            return {
+                "scryfall_id": scryfall_id,
+                "name": card.get("name") or "",
+                "image_url": catalog_image_url(scryfall_id),
+                "kind": "commander" if section == "commander" else "card",
+            }
+    return None
 
 
 def importable_deck_cards(deck: dict[str, Any]) -> list[dict[str, Any]]:
@@ -256,30 +319,52 @@ def extract_price_entry(uuid: str) -> dict[str, Any] | None:
         raise MtgjsonError(f"MTGJSON prices request failed: {error.reason}") from error
 
 
-def extract_price_entries(uuids: list[str]) -> dict[str, dict[str, Any]]:
+def extract_price_entries(
+    uuids: list[str],
+    *,
+    source: str = "all",
+    on_progress: Callable[[int, int], None] | None = None,
+) -> dict[str, dict[str, Any]]:
     remaining = set(uuids)
     if not remaining:
         return {}
 
-    local_path = os.environ.get("MTGJSON_ALL_PRICES")
+    if source == "today":
+        local_path = os.environ.get("MTGJSON_ALL_PRICES_TODAY")
+        remote_url = ALL_PRICES_TODAY_GZ_URL
+    else:
+        local_path = os.environ.get("MTGJSON_ALL_PRICES")
+        remote_url = ALL_PRICES_GZ_URL
+
     if local_path:
         path = Path(local_path)
         if not path.exists():
-            raise MtgjsonError(f"MTGJSON_ALL_PRICES introuvable: {path}")
+            raise MtgjsonError(f"Fichier prix MTGJSON introuvable: {path}")
         opener = gzip.open if path.suffix == ".gz" else open
         with opener(path, "rt", encoding="utf-8") as handle:
-            return extract_price_entries_from_text_stream(handle, remaining)
+            return extract_price_entries_from_text_stream(handle, remaining, on_progress=on_progress)
 
-    request = Request(ALL_PRICES_GZ_URL, headers={"Accept": "application/json", "User-Agent": USER_AGENT})
+    request = Request(remote_url, headers={"Accept": "application/json", "User-Agent": USER_AGENT})
     try:
-        with urlopen(request, timeout=120) as response:
+        with urlopen(request, timeout=180) as response:
             with gzip.GzipFile(fileobj=response) as gzip_file:
-                return extract_price_entries_from_text_stream(TextChunkReader(gzip_file), remaining)
+                return extract_price_entries_from_text_stream(
+                    TextChunkReader(gzip_file),
+                    remaining,
+                    on_progress=on_progress,
+                )
     except HTTPError as error:
         details = error.read().decode("utf-8", errors="replace")
         raise MtgjsonError(f"MTGJSON prices HTTP {error.code}: {details}") from error
     except URLError as error:
         raise MtgjsonError(f"MTGJSON prices request failed: {error.reason}") from error
+
+
+def extract_price_entries_today(
+    uuids: list[str],
+    on_progress: Callable[[int, int], None] | None = None,
+) -> dict[str, dict[str, Any]]:
+    return extract_price_entries(uuids, source="today", on_progress=on_progress)
 
 
 class TextChunkReader:
@@ -345,10 +430,16 @@ def extract_price_entry_from_text_stream(stream: Any, uuid: str) -> dict[str, An
                         return json.loads(object_text)
 
 
-def extract_price_entries_from_text_stream(stream: Any, uuids: set[str]) -> dict[str, dict[str, Any]]:
+def extract_price_entries_from_text_stream(
+    stream: Any,
+    uuids: set[str],
+    *,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> dict[str, dict[str, Any]]:
     # AllPrices is a giant JSON object. This parser walks the decompressed text
     # once and captures only objects whose key is in the requested UUID set.
     results: dict[str, dict[str, Any]] = {}
+    initial_total = len(uuids)
     current_key = ""
     object_text = ""
     depth = 0
@@ -384,6 +475,8 @@ def extract_price_entries_from_text_stream(stream: Any, uuids: set[str]) -> dict
                         if depth == 0 and target_key is not None:
                             results[target_key] = json.loads(object_text)
                             uuids.discard(target_key)
+                            if on_progress is not None:
+                                on_progress(len(results), initial_total)
                             if stack and stack[-1] == target_key:
                                 stack.pop()
                             if not uuids:

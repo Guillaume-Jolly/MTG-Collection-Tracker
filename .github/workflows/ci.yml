@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, 'feature/**']
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Install git hooks path (validate stack)
+        run: npm run hooks:install
+
+      - name: Validate infra stack
+        run: npm run validate:stack
+
+      # Scripts validate:* spécifiques projet — voir REFERENCE/projects/{projet}.md
+      # Exemple IDLE (décommenter / adapter) :
+      # - run: npm run validate:companion-bonds
+      # - run: npm run validate:link-corpus
+
+      - name: Build
+        run: npm run build
+        continue-on-error: false

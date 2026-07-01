@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeSubmitPrompt": [
+      {
+        "command": "node \".cursor/hooks/A.B.C.X.Y - X update - prompt indent.mjs\""
+      }
+    ],
+    "stop": [
+      {
+        "command": "node \".cursor/hooks/A.B.C.X.Y - Y update - subprompt indent.mjs\""
+      }
+    ]
+  }
+}

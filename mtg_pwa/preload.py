@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 from .database import (
     DEFAULT_DB_PATH,
+    catalog_table,
     connect,
     image_url_for,
     init_db,
@@ -162,10 +163,9 @@ def preload_commander_decks(
 
         if download_images:
             log(f"Telechargement des images: {len(scryfall_ids)} cartes...")
+            cards_table = catalog_table("cards")
             rows = db.execute(
-                "SELECT scryfall_id, raw_json FROM cards WHERE scryfall_id IN ({})".format(
-                    ",".join("?" for _ in scryfall_ids)
-                ),
+                f"SELECT scryfall_id, raw_json FROM {cards_table} WHERE scryfall_id IN ({','.join('?' for _ in scryfall_ids)})",
                 scryfall_ids,
             ).fetchall()
             cards_by_id = {row["scryfall_id"]: json.loads(row["raw_json"]) for row in rows}

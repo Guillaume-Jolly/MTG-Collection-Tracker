@@ -1,0 +1,74 @@
+---
+description: Release A.B.C — rituels MEP, push main, push branche (complète X/Y)
+alwaysApply: true
+---
+
+# Release A · B · C — comportement agent
+
+Schéma : [`REFERENCE/docs/processes/versionnement-global.md`](C:/Dev/Project/REFERENCE/docs/processes/versionnement-global.md)
+
+**Guillaume** seul décideur — **jamais** `git push main` ni MEP sans **go explicite**.
+
+---
+
+## C — push branche feature (auto + rituel agent)
+
+**Bump :** `git push` branche → hook `pre-push` → **C+1** (`version:branch-push`).
+
+### Avant un push branche (proposer si pas fait)
+
+1. `npm run build` minimum ; scripts `validate:*` **du projet** si domaine touché
+2. **DEV_LOG** : lignes Y à jour, section X en cours complétée si fin de lot
+3. **Docs** : `project-state.md`, entrées changelog si modif significative
+4. **Normalisation** : chemins doc → index croisé projet si déplacés
+5. Commits atomiques (1 Y ≈ 1 commit)
+
+### Clôture de branche (pas à chaque C — quand la feature est terminée)
+
+| Action | Détail |
+|--------|--------|
+| DEV_LOG | Recap tâches agent, déplacer section ⚠️ → Historique |
+| Validation | Release gate du projet ([`pipeline-validation-pattern`](C:/Dev/Project/REFERENCE/docs/processes/pipeline-validation-pattern.md)) |
+| Nettoyage | **Move gitignore only** → `old_{A}_{B}/` — [`fin-de-B-cleanup`](C:/Dev/Project/REFERENCE/docs/processes/fin-de-B-cleanup.md) |
+| Relecture | [`relecture-code-hygiene`](C:/Dev/Project/REFERENCE/docs/processes/relecture-code-hygiene.md) si phase longue |
+| Push | `git push` branche → **C** auto |
+
+---
+
+## B — push main (auto + rituel agent)
+
+**Bump :** `git push` `main` → hook → **B+1** (`version:main-push`).
+
+### Avant push main — **demander le go** + checklist
+
+1. **Confirmer** avec Guillaume : merge / push `main` autorisé
+2. Release gate projet (`npm run build` + `validate:*` définis dans `AGENTS.md`)
+3. VERSION-INDEX / project-state à jour
+4. DEV_LOG phase : sections complétées pour ce qui part en `main`
+5. Push → **B** auto
+
+**B ≠ MEP.** Push `main` sans deploy prod = **B** seulement, pas **A**.
+
+---
+
+## A — MEP (jamais auto — agent propose, humain valide)
+
+1. **Demander** : « On lance la procédure MEP complète (A) ? »
+2. **Ne pas** exécuter `npm run version:mep` sans accord explicite
+3. Si oui → `npm run version:mep -- --dry-run` → attendre **go**
+4. Checklist : [`mep-checklist.md`](C:/Dev/Project/REFERENCE/docs/processes/mep-checklist.md)
+
+---
+
+## Kickoff phase suivante
+
+Voir [`kickoff-nouvelle-phase.md`](C:/Dev/Project/REFERENCE/docs/processes/kickoff-nouvelle-phase.md) — inclut archive `old_{A}_{B}/` fin de B.
+
+---
+
+## Install & rappels
+
+- Clone : `npm run hooks:install`
+- X/Y : règle `02-version-prompt-first.mdc`
+- Nettoyage : **move vers gitignore uniquement** — `01-no-deletion-archive-only.mdc`
+- Un seul writer agent par working tree

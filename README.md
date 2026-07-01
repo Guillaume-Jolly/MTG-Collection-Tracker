@@ -61,9 +61,27 @@ python run_mvp.py
 python -m unittest discover -s tests
 ```
 
+## Versionnement (agents Cursor)
+
+Label UI : `v{semver}.{XX}` ou `v{semver}.{XX}.{Y}` (ex. `v1.1.0.02.1`).
+
+- **Hooks** : `.cursor/hooks.json` (X auto à chaque message user, Y auto en fin de tour si diff)
+- **Journal** : `docs/traceability/changelog/DEV_LOG_0_1.md`
+- **Doc** : [`docs/agent-guide/05-politique-versionnement.md`](docs/agent-guide/05-politique-versionnement.md) · [`AGENTS.md`](AGENTS.md)
+
+Commandes (nécessite [Node.js](https://nodejs.org/) pour les scripts) :
+
+```bash
+npm run version:prompt   # X+1 (normalement via hook)
+npm run version:task     # Y+1
+npm run version:sync     # sync build-info sans bump
+```
+
+Redémarrer Cursor après installation des hooks.
+
 ## Dépendances
 
-Python 3.11+ (stdlib uniquement, pas de packages externes requis).
+Python 3.11+ (stdlib uniquement). Node.js 18+ recommandé pour le versionnement X/Y et les hooks Cursor.
 
 ## Contribution
 

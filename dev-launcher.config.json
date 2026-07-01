@@ -1,0 +1,15 @@
+{
+  "projectLabel": "MTG Tracker",
+  "dashboardPort": 9222,
+  "devHost": "127.0.0.1",
+  "devPort": 8000,
+  "devScript": "dev:server",
+  "buildScript": "build",
+  "buildInfoRelativePath": "public/build-info.json",
+  "revisionRelativePath": "build-revision.json",
+  "openBrowserOnStart": true,
+  "openDashboardOnStart": true,
+  "syncBuildInfoOnStart": true,
+  "accentColor": "#c9a227",
+  "browserExecutable": "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"
+}

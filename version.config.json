@@ -1,0 +1,12 @@
+{
+  "projectLabel": "MTG Tracker",
+  "devLogRelativePath": "docs/traceability/changelog/DEV_LOG_1_1.md",
+  "versionIndexRelativePath": "docs/traceability/changelog/VERSION-INDEX.md",
+  "releaseEventsRelativePath": "docs/traceability/changelog/release-events.jsonl",
+  "gitignoreArchiveDirs": [
+    "old_assets/",
+    "old_0_1/",
+    "old_1_0/",
+    "archive/"
+  ]
+}

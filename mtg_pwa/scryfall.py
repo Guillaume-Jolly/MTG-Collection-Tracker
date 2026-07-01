@@ -65,6 +65,43 @@ class ScryfallClient:
             self.throttle()
         return cards
 
+    def cards_by_oracle_id(self, oracle_id: str, *, max_cards: int = 120) -> list[dict[str, Any]]:
+        if not oracle_id:
+            return []
+        cards: list[dict[str, Any]] = []
+        params = {
+            "q": f"oracle_id:{oracle_id}",
+            "unique": "prints",
+            "order": "released",
+            "dir": "desc",
+        }
+        payload = self._get("/cards/search", params=params)
+        cards.extend(payload.get("data", []))
+        while payload.get("has_more") and len(cards) < max_cards:
+            self.throttle()
+            next_page = payload.get("next_page")
+            if not next_page:
+                break
+            payload = self._get_url(next_page)
+            cards.extend(payload.get("data", []))
+        return cards[:max_cards]
+
+    def cards_by_set_collector(
+        self,
+        set_code: str,
+        collector_number: str,
+        *,
+        limit: int = 12,
+    ) -> list[dict[str, Any]]:
+        if not set_code or not collector_number:
+            return []
+        params = {
+            "q": f"set:{set_code.lower()} cn:{collector_number}",
+            "unique": "prints",
+        }
+        payload = self._get("/cards/search", params=params)
+        return list(payload.get("data", []))[:limit]
+
     def card_by_set_number_lang(self, set_code: str, collector_number: str, lang: str = "en") -> dict[str, Any]:
         safe_set = quote(set_code.lower(), safe="")
         safe_number = quote(collector_number, safe="")
@@ -75,7 +112,9 @@ class ScryfallClient:
         url = f"{self.base_url}{path}"
         if params:
             url = f"{url}?{urlencode(params)}"
+        return self._get_url(url)
 
+    def _get_url(self, url: str) -> dict[str, Any]:
         request = Request(
             url,
             headers={

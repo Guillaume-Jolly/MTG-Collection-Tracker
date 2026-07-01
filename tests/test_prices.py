@@ -16,7 +16,7 @@ from mtg_pwa.database import (
     save_fallback_price_snapshot,
     save_price_snapshots,
 )
-from mtg_pwa.prices import current_eur_price, extract_eur_prices, parse_price
+from mtg_pwa.prices import available_finishes_for_card, current_eur_price, extract_eur_prices, parse_price
 
 
 class PriceSelectionTest(unittest.TestCase):
@@ -39,6 +39,16 @@ class PriceSelectionTest(unittest.TestCase):
             extract_eur_prices(card),
             {"nonfoil": Decimal("1.20"), "foil": Decimal("2.40")},
         )
+
+    def test_available_finishes_merges_scryfall_prices_and_collection(self) -> None:
+        card = {
+            "finishes": ["nonfoil"],
+            "prices": {"eur": "1.20", "eur_foil": "2.40"},
+        }
+
+        finishes = available_finishes_for_card(card, extra_finishes=["etched"])
+
+        self.assertEqual(finishes, ["nonfoil", "foil", "etched"])
 
     def test_current_price_uses_requested_finish(self) -> None:
         card = {"prices": {"eur": "1.20", "eur_foil": "2.40"}}
@@ -75,7 +85,8 @@ class PriceSelectionTest(unittest.TestCase):
             self.assertIsNotNone(price)
             assert price is not None
             self.assertEqual(price.price, Decimal("3.5"))
-            self.assertTrue(price.is_fallback)
+            self.assertFalse(price.is_fallback)
+            conn.close()
 
     def test_card_summary_marks_fallback_price(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -100,7 +111,8 @@ class PriceSelectionTest(unittest.TestCase):
             )
 
             self.assertEqual(summary["price"]["price"], 4.0)
-            self.assertTrue(summary["price"]["is_fallback"])
+            self.assertFalse(summary["price"]["is_fallback"])
+            conn.close()
 
     def test_card_summary_uses_available_finish_when_requested_finish_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -121,6 +133,7 @@ class PriceSelectionTest(unittest.TestCase):
             self.assertEqual(summary["display_finish"], "foil")
             self.assertEqual(summary["price"]["finish"], "foil")
             self.assertEqual(summary["price"]["price"], 78.17)
+            conn.close()
 
     def test_fallback_snapshot_can_use_english_print_price_for_localized_card(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -148,7 +161,9 @@ class PriceSelectionTest(unittest.TestCase):
             self.assertIsNotNone(price)
             assert price is not None
             self.assertEqual(price.price, Decimal("0.26"))
-            self.assertTrue(price.is_fallback)
+            self.assertFalse(price.is_fallback)
+            self.assertIn("en-print", price.source)
+            conn.close()
 
     def test_price_periods_are_unavailable_when_history_is_too_short(self) -> None:
         history = [
@@ -195,6 +210,46 @@ class PriceSelectionTest(unittest.TestCase):
         self.assertFalse(periods["6m"]["available"])
         self.assertFalse(periods["1y"]["available"])
         self.assertFalse(periods["5y"]["available"])
+
+
+    def test_latest_snapshot_prefers_scryfall_over_mtgjson(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "test.sqlite3")
+            init_db(conn)
+            card_id = "00000000-0000-0000-0000-000000000099"
+            save_card(conn, {"id": card_id, "name": "Snapshot Card", "prices": {"eur": None}})
+            conn.execute(
+                """
+                INSERT INTO price_snapshots (
+                    scryfall_id, currency, finish, price, source, snapshot_date,
+                    collected_at, source_updated_at
+                )
+                VALUES (?, 'EUR', 'nonfoil', ?, 'mtgjson-cardmarket', '2026-06-29', ?, NULL)
+                """,
+                (card_id, 1.0, "2026-06-29T00:00:00+00:00"),
+            )
+            conn.execute(
+                """
+                INSERT INTO price_snapshots (
+                    scryfall_id, currency, finish, price, source, snapshot_date,
+                    collected_at, source_updated_at
+                )
+                VALUES (?, 'EUR', 'nonfoil', ?, 'scryfall-cardmarket', '2026-06-29', ?, NULL)
+                """,
+                (card_id, 2.5, "2026-06-29T12:00:00+00:00"),
+            )
+            conn.commit()
+            conn.close()
+
+            conn = connect(Path(tmp) / "test.sqlite3")
+            price = latest_snapshot(conn, card_id, "nonfoil")
+            conn.close()
+
+            self.assertIsNotNone(price)
+            assert price is not None
+            self.assertEqual(price.price, Decimal("2.5"))
+            self.assertEqual(price.source, "scryfall-cardmarket")
+            self.assertFalse(price.is_fallback)
 
 
 if __name__ == "__main__":

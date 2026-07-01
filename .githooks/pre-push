@@ -1,0 +1,5 @@
+#!/bin/sh
+# Git pre-push — bump release B/C (voir docs/agent-guide/08-versionnement-global.md)
+cd "$(git rev-parse --show-toplevel)" 2>/dev/null || exit 0
+node scripts/git-hooks/on-pre-push.mjs
+exit 0

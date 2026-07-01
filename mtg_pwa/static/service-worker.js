@@ -1,10 +1,13 @@
-const CACHE_NAME = "mtg-price-tracker-v13";
+const CACHE_NAME = "mtg-price-tracker-v60";
 const STATIC_ASSETS = [
   "/",
-  "/styles.css?v=deck-sort-v13",
-  "/app.js?v=deck-sort-v13",
+  "/styles.css?v=detail-printing-click-v1",
+  "/app.js?v=detail-printing-click-v1",
   "/manifest.json",
   "/icon.svg",
+  "/splash/splash-1.png",
+  "/splash/splash-2.png",
+  "/splash/splash-3.png",
 ];
 
 self.addEventListener("install", (event) => {
@@ -23,7 +26,11 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
-  if (url.pathname.startsWith("/api/")) {
+  if (
+    url.pathname.startsWith("/api/") ||
+    url.pathname.startsWith("/cache/set-icons/") ||
+    url.pathname.startsWith("/cache/images/")
+  ) {
     return;
   }
 
