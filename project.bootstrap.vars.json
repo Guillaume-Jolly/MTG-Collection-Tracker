@@ -9,6 +9,7 @@
   "releaseEventsRelativePath": "docs/traceability/changelog/release-events.jsonl",
   "gitignoreArchiveDirs": ["old_assets/", "old_0_1/", "archive/"],
   "referenceImplementationPath": "C:\\Dev\\Project\\REFERENCE",
+  "ciProfile": "node-python",
   "validateScripts": [
     "npm run build",
     "python -m unittest discover -s tests -q"
