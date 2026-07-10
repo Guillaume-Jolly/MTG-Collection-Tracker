@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Iterable
 
-from .database import catalog_table, utc_now
+from .database import catalog_pragma_table_info, catalog_table, utc_now
 
 # mtgjson-cardmarket exclu — CM via cardmarket_price_guide_daily
 SOURCE_FINISH_COLUMN: dict[tuple[str, str], str] = {
@@ -67,10 +67,13 @@ def price_daily_table() -> str:
 
 
 def ensure_price_daily_schema(conn) -> None:
+    from .database import uses_shared_catalog
+
     cols_sql = ",\n            ".join(f"{col} REAL" for col in PRICE_DAILY_VALUE_COLUMNS)
+    table = price_daily_table()
     conn.execute(
         f"""
-        CREATE TABLE IF NOT EXISTS {price_daily_table()} (
+        CREATE TABLE IF NOT EXISTS {table} (
             snapshot_date TEXT NOT NULL,
             scryfall_id TEXT NOT NULL,
             collected_at TEXT NOT NULL,
@@ -80,22 +83,23 @@ def ensure_price_daily_schema(conn) -> None:
         )
         """
     )
-    info = conn.execute(f"PRAGMA table_info({price_daily_table()})").fetchall()
+    info = catalog_pragma_table_info(conn, "price_daily")
     column_names = {row[1] for row in info}
     if "source_updated_at" not in column_names:
-        conn.execute(f"ALTER TABLE {price_daily_table()} ADD COLUMN source_updated_at TEXT")
-    conn.execute(
-        f"""
-        CREATE INDEX IF NOT EXISTS idx_price_daily_card_date
-        ON {price_daily_table()}(scryfall_id, snapshot_date)
-        """
-    )
-    conn.execute(
-        f"""
-        CREATE INDEX IF NOT EXISTS idx_price_daily_date
-        ON {price_daily_table()}(snapshot_date)
-        """
-    )
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN source_updated_at TEXT")
+    if not uses_shared_catalog():
+        conn.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS idx_price_daily_card_date
+            ON {table}(scryfall_id, snapshot_date)
+            """
+        )
+        conn.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS idx_price_daily_date
+            ON {table}(snapshot_date)
+            """
+        )
 
 
 def uses_price_daily_storage(conn) -> bool:

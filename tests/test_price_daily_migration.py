@@ -15,8 +15,13 @@ from mtg_pwa.price_daily import (
 
 class PriceDailyMigrationTest(unittest.TestCase):
     def _prepare_legacy_table(self, conn) -> None:
-        conn.execute("DROP TABLE IF EXISTS price_snapshots")
-        conn.execute("DROP VIEW IF EXISTS price_snapshots")
+        row = conn.execute(
+            "SELECT type FROM sqlite_master WHERE name = 'price_snapshots'"
+        ).fetchone()
+        if row and row[0] == "view":
+            conn.execute("DROP VIEW price_snapshots")
+        elif row and row[0] == "table":
+            conn.execute("DROP TABLE price_snapshots")
         conn.execute("DROP TABLE IF EXISTS price_snapshots_legacy")
         conn.execute(
             """

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 
 from mtg_pwa.database import (
@@ -10,7 +11,7 @@ from mtg_pwa.database import (
     connect,
     init_db,
     save_card,
-    save_external_price_snapshots,
+    save_price_snapshots,
     shared_prices_db_path,
     uses_shared_catalog,
 )
@@ -31,21 +32,12 @@ class SharedCatalogTest(unittest.TestCase):
                 "prices": {"eur": "3.00"},
             }
             save_card(dev_conn, card)
-            save_external_price_snapshots(
-                dev_conn,
-                [
-                    {
-                        "scryfall_id": card["id"],
-                        "currency": "EUR",
-                        "finish": "nonfoil",
-                        "price": 3.0,
-                        "source": "mtgjson-cardmarket",
-                        "snapshot_date": "2026-06-30",
-                        "collected_at": "2026-06-30T00:00:00+00:00",
-                    }
-                ],
-            )
+            save_price_snapshots(dev_conn, card)
+            from mtg_pwa.price_daily import install_price_snapshots_view
+
+            install_price_snapshots_view(dev_conn)
             dev_conn.commit()
+            dev_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             dev_conn.close()
 
             os.environ["MTG_PWA_PRICES_DB"] = str(dev_db)
@@ -56,14 +48,17 @@ class SharedCatalogTest(unittest.TestCase):
                 prod_conn = connect(prod_db)
                 init_db(prod_conn)
                 snapshots_table = catalog_table("price_snapshots")
+                snapshot_date = date.today().isoformat()
                 row = prod_conn.execute(
                     f"""
                     SELECT price
                     FROM {snapshots_table}
-                    WHERE scryfall_id = ? AND snapshot_date = '2026-06-30'
+                    WHERE scryfall_id = ? AND snapshot_date = ?
                     """,
-                    (card["id"],),
+                    (card["id"], snapshot_date),
                 ).fetchone()
+                prod_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                prod_conn.execute("DETACH DATABASE shared")
                 prod_conn.close()
             finally:
                 os.environ.pop("MTG_PWA_PRICES_DB", None)

@@ -66,6 +66,14 @@ def catalog_table(table_name: str) -> str:
     return table_name
 
 
+def catalog_pragma_table_info(conn: sqlite3.Connection, table_name: str) -> list[sqlite3.Row]:
+    qualified = catalog_table(table_name)
+    if "." in qualified:
+        schema, bare_table = qualified.split(".", 1)
+        return conn.execute(f"PRAGMA {schema}.table_info({bare_table})").fetchall()
+    return conn.execute(f"PRAGMA table_info({qualified})").fetchall()
+
+
 def catalog_object_type(conn: sqlite3.Connection, object_name: str) -> str | None:
     bare_name = object_name.split(".")[-1]
     row = conn.execute(
