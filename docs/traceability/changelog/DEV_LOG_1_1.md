@@ -640,16 +640,18 @@
 **Validations :** ⚠️ _…_
 **Risques :** ⚠️ _…_
 
-### X=58 — 2026-07-10 — ⚠️ À COMPLÉTER
+### X=58 — 2026-07-10 — GO commits + VACUUM + bench market froid
 
-**But du prompt :** ⚠️ _(à compléter — relire le message user de ce prompt)_
+**But du prompt :** Exécuter les commits atomiques phase B, VACUUM BDD, benchmark market movers à froid.
 
 | Y | Résumé | Commit | Label UI |
 |---|--------|--------|----------|
 | 0 | `version:prompt` | *(non commité)* | `v1.4.0.58` |
+| 1 | 5 commits phase B (price_daily, prices, db audit, collection, docs) + VACUUM + bench froid 2,8 s | `0eacbee`…`c3d030b` | `v1.4.0.58.1` |
 
-**Validations :** ⚠️ _…_
-**Risques :** ⚠️ _…_
+**Validations :** VACUUM 5,662 → 5,621 Go (157 s) · `health_check_daily` match:true · market movers froid **2817 ms** (vs ~12 s pré-migration) · chaud ~19 ms
+
+**Risques :** `_tmp_*` / scripts debug non commités · push main = B+1 (go séparé requis)
 
 ## Historique complété
 
