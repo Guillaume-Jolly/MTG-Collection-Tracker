@@ -653,6 +653,28 @@
 
 **Risques :** `_tmp_*` / scripts debug non commités · push main = B+1 (go séparé requis)
 
+### X=59 — 2026-07-10 — ⚠️ À COMPLÉTER
+
+**But du prompt :** ⚠️ _(à compléter — relire le message user de ce prompt)_
+
+| Y | Résumé | Commit | Label UI |
+|---|--------|--------|----------|
+| 0 | `version:prompt` | *(non commité)* | `v1.4.0.59` |
+
+**Validations :** ⚠️ _…_
+**Risques :** ⚠️ _…_
+
+### X=60 — 2026-07-10 — ⚠️ À COMPLÉTER
+
+**But du prompt :** ⚠️ _(à compléter — relire le message user de ce prompt)_
+
+| Y | Résumé | Commit | Label UI |
+|---|--------|--------|----------|
+| 0 | `version:prompt` | *(non commité)* | `v1.4.0.60` |
+
+**Validations :** ⚠️ _…_
+**Risques :** ⚠️ _…_
+
 ## Historique complété
 
 _(sections X finalisées)_
