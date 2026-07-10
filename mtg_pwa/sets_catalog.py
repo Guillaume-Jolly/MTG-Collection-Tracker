@@ -2,23 +2,31 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from .database import (
+    build_language_siblings_for_collectors,
     build_set_language_siblings,
+    batch_latest_snapshots,
     catalog_table,
     connect,
     decimal_to_json,
     display_price_for,
+    display_price_source_label,
     finish_breakdown_for_scryfall,
+    get_cached_card,
     init_db,
+    language_sibling_ids_db,
     owned_counts_by_card_finish,
     resolve_display_card_db,
     resolve_display_card_id,
 )
+from .prices import current_eur_price
 from .local_cache import (
     CacheError,
     catalog_image_url,
@@ -761,19 +769,52 @@ def set_cards(set_code: str, *, sort: str = "price_desc", display_lang: str = "m
         ).fetchall()
         scryfall_cards = {row["scryfall_id"]: json.loads(row["raw_json"]) for row in rows}
 
-    set_siblings = build_set_language_siblings(conn, code)
-    rendered = [
-        mtgjson_card_to_payload(
-            card,
-            owned,
-            scryfall_cards,
-            set_siblings,
-            display_lang,
-            owned_by_finish=owned_by_finish,
+    set_siblings = build_set_language_siblings(conn, code) if display_lang == "merge" else {}
+    sibling_row_cache: dict[tuple[str, str], dict[str, str]] = {}
+    if display_lang != "merge":
+        needed_numbers: set[str] = set()
+        for card in cards:
+            if card.get("isFunny", False):
+                continue
+            scryfall_id = (card.get("identifiers") or {}).get("scryfallId")
+            if not scryfall_id or scryfall_id not in scryfall_cards:
+                continue
+            base_card = scryfall_cards[scryfall_id]
+            collector_number = str(base_card.get("collector_number") or card.get("number") or "").strip()
+            card_lang = str(base_card.get("lang") or "en").lower()
+            if card_lang != display_lang and collector_number:
+                needed_numbers.add(collector_number)
+        if needed_numbers:
+            sibling_row_cache = build_language_siblings_for_collectors(conn, {code.lower(): needed_numbers})
+    rendered = []
+    for card in cards:
+        if card.get("isFunny", False):
+            continue
+        scryfall_id = (card.get("identifiers") or {}).get("scryfallId")
+        row_siblings = set_siblings
+        if display_lang != "merge" and scryfall_id and scryfall_id in scryfall_cards:
+            base_card = scryfall_cards[scryfall_id]
+            collector_number = str(base_card.get("collector_number") or card.get("number") or "").strip()
+            card_lang = str(base_card.get("lang") or "en").lower()
+            if card_lang != display_lang and collector_number:
+                resolved = sibling_row_cache.get((code.lower(), collector_number), {})
+                if resolved:
+                    resolved = {**resolved, card_lang: scryfall_id}
+                else:
+                    resolved = language_sibling_ids_db(conn, base_card)
+                row_siblings = {collector_number: resolved}
+            else:
+                row_siblings = {}
+        rendered.append(
+            mtgjson_card_to_payload(
+                card,
+                owned,
+                scryfall_cards,
+                row_siblings,
+                display_lang,
+                owned_by_finish=owned_by_finish,
+            )
         )
-        for card in cards
-        if not card.get("isFunny", False)
-    ]
 
     sort_cards(rendered, sort)
 
@@ -980,18 +1021,23 @@ def scryfall_card_to_owned_payload(
     *,
     display_lang: str = "merge",
     siblings: dict[str, str] | None = None,
+    include_live_prices: bool = True,
 ) -> dict[str, Any]:
     finish = row["finish"]
     quantity = int(row["quantity"])
     display_card = resolve_display_card_db(conn, card, display_lang, siblings=siblings)
     prices = card_prices_eur(display_card)
-    price_point = display_price_for(conn, display_card, finish)
+    if include_live_prices:
+        price_point = display_price_for(conn, display_card, finish)
+    else:
+        price_point = current_eur_price(display_card, finish)
     unit_price = float(price_point.price) if price_point else None
     type_line = display_card.get("type_line") or ""
     card_type, subtype = card_type_parts(type_line)
 
     return {
         "scryfall_id": card["id"],
+        "display_scryfall_id": display_card["id"],
         "name": display_card.get("name"),
         "printed_name": display_card.get("printed_name"),
         "lang": display_card.get("lang"),
@@ -1015,6 +1061,42 @@ def scryfall_card_to_owned_payload(
         "unit_price_eur": unit_price,
         "line_value_eur": (unit_price or 0) * quantity,
     }
+
+
+def enrich_owned_cards_live_prices(conn, cards: list[dict[str, Any]]) -> None:
+    if not cards:
+        return
+    pairs: list[tuple[str, str]] = []
+    display_ids: dict[str, dict[str, Any]] = {}
+    for card in cards:
+        display_id = card.get("display_scryfall_id") or card["scryfall_id"]
+        display_card = get_cached_card(conn, display_id)
+        if not display_card:
+            continue
+        finish = card.get("finish") or "nonfoil"
+        display_ids[card["scryfall_id"]] = display_card
+        if current_eur_price(display_card, finish) is None:
+            pairs.append((display_id, finish))
+
+    snapshots = batch_latest_snapshots(conn, pairs)
+    for card in cards:
+        display_id = card.get("display_scryfall_id") or card["scryfall_id"]
+        display_card = display_ids.get(card["scryfall_id"]) or get_cached_card(conn, display_id)
+        if not display_card:
+            continue
+        finish = card.get("finish") or "nonfoil"
+        price_point = current_eur_price(display_card, finish)
+        if price_point is None:
+            price_point = snapshots.get((display_id, finish))
+            if price_point is None:
+                price_point = display_price_for(conn, display_card, finish)
+        unit_price = float(price_point.price) if price_point else card.get("unit_price_eur")
+        card["unit_price_eur"] = unit_price
+        card["line_value_eur"] = (unit_price or 0) * int(card.get("quantity") or 0)
+        prices = card_prices_eur(display_card)
+        card["price_nonfoil"] = prices["nonfoil"]
+        card["price_foil"] = prices["foil"]
+        card["price_source"] = display_price_source_label(display_card, finish, price_point)
 
 
 def merge_owned_cards_by_scryfall(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1051,32 +1133,131 @@ def merge_owned_cards_by_scryfall(cards: list[dict[str, Any]]) -> list[dict[str,
     return merged
 
 
-def list_owned_collection_cards(conn, *, sort: str = "name_asc", display_lang: str = "merge") -> dict[str, Any]:
-    cards_table = catalog_table("cards")
-    rows = conn.execute(
-        f"""
-        SELECT ci.scryfall_id, ci.finish, ci.quantity, c.raw_json
-        FROM collection_items ci
-        JOIN {cards_table} c ON c.scryfall_id = ci.scryfall_id
-        WHERE ci.quantity > 0
-        """
-    ).fetchall()
+MY_COLLECTION_PAGE_SIZES = (50, 100, 200, 500)
+_OWNED_COLLECTION_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_OWNED_COLLECTION_CACHE_LOCK = threading.Lock()
+_OWNED_COLLECTION_CACHE_TTL = 300.0
 
-    parsed_rows = [(row, json.loads(row["raw_json"])) for row in rows]
-    set_codes = {
-        str(card.get("set") or "").lower()
-        for _, card in parsed_rows
-        if card.get("set")
-    }
-    siblings_by_set = {set_code: build_set_language_siblings(conn, set_code) for set_code in set_codes}
 
-    cards = []
-    for row, card in parsed_rows:
+def invalidate_owned_collection_cache() -> None:
+    with _OWNED_COLLECTION_CACHE_LOCK:
+        _OWNED_COLLECTION_CACHE.clear()
+
+
+def _owned_collection_cache_key(sort: str, display_lang: str) -> str:
+    return json.dumps({"sort": sort, "display_lang": display_lang}, sort_keys=True, separators=(",", ":"))
+
+
+def _siblings_for_owned_line(
+    conn,
+    card: dict[str, Any],
+    *,
+    display_lang: str,
+    siblings_by_set: dict[str, dict[str, dict[str, str]]],
+    sibling_row_cache: dict[tuple[str, str], dict[str, str]],
+) -> dict[str, str]:
+    set_code = str(card.get("set") or "").lower()
+    collector_number = str(card.get("collector_number") or "").strip()
+    card_lang = str(card.get("lang") or "en").lower()
+
+    if display_lang == "merge":
+        siblings = siblings_by_set.get(set_code, {}).get(collector_number)
+        if siblings:
+            return siblings
+        return {card_lang: card["id"]}
+
+    if card_lang == display_lang:
+        return {card_lang: card["id"]}
+
+    cache_key = (set_code, collector_number)
+    cached = sibling_row_cache.get(cache_key)
+    if cached is not None:
+        cached.setdefault(card_lang, card["id"])
+        return cached
+    resolved = language_sibling_ids_db(conn, card)
+    sibling_row_cache[cache_key] = resolved
+    return resolved
+
+
+def _collect_needed_language_siblings(
+    parsed_rows: list[tuple[Any, dict[str, Any]]],
+    *,
+    display_lang: str,
+) -> dict[str, set[str]]:
+    needed_by_set: dict[str, set[str]] = {}
+    if display_lang == "merge":
+        return needed_by_set
+    for _, card in parsed_rows:
+        card_lang = str(card.get("lang") or "en").lower()
+        if card_lang == display_lang:
+            continue
         set_code = str(card.get("set") or "").lower()
         collector_number = str(card.get("collector_number") or "").strip()
-        siblings = siblings_by_set.get(set_code, {}).get(collector_number)
-        if not siblings:
-            siblings = {str(card.get("lang") or "en").lower(): card["id"]}
+        if set_code and collector_number:
+            needed_by_set.setdefault(set_code, set()).add(collector_number)
+    return needed_by_set
+
+
+def _load_owned_parsed_rows(
+    conn,
+    scryfall_ids: set[str] | None = None,
+) -> list[tuple[Any, dict[str, Any]]]:
+    cards_table = catalog_table("cards")
+    if scryfall_ids:
+        ids = sorted({sid for sid in scryfall_ids if sid})
+        if not ids:
+            return []
+        placeholders = ",".join("?" * len(ids))
+        rows = conn.execute(
+            f"""
+            SELECT ci.scryfall_id, ci.finish, ci.quantity, c.raw_json
+            FROM collection_items ci
+            JOIN {cards_table} c ON c.scryfall_id = ci.scryfall_id
+            WHERE ci.quantity > 0 AND ci.scryfall_id IN ({placeholders})
+            """,
+            ids,
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"""
+            SELECT ci.scryfall_id, ci.finish, ci.quantity, c.raw_json
+            FROM collection_items ci
+            JOIN {cards_table} c ON c.scryfall_id = ci.scryfall_id
+            WHERE ci.quantity > 0
+            """
+        ).fetchall()
+    return [(row, json.loads(row["raw_json"])) for row in rows]
+
+
+def _build_owned_cards_from_parsed_rows(
+    conn,
+    parsed_rows: list[tuple[Any, dict[str, Any]]],
+    *,
+    display_lang: str,
+    include_live_prices: bool = False,
+) -> list[dict[str, Any]]:
+    siblings_by_set: dict[str, dict[str, dict[str, str]]] = {}
+    sibling_row_cache: dict[tuple[str, str], dict[str, str]] = {}
+    if display_lang == "merge":
+        set_codes = {
+            str(card.get("set") or "").lower()
+            for _, card in parsed_rows
+            if card.get("set")
+        }
+        siblings_by_set = {set_code: build_set_language_siblings(conn, set_code) for set_code in set_codes}
+    else:
+        needed_by_set = _collect_needed_language_siblings(parsed_rows, display_lang=display_lang)
+        sibling_row_cache = build_language_siblings_for_collectors(conn, needed_by_set)
+
+    cards: list[dict[str, Any]] = []
+    for row, card in parsed_rows:
+        siblings = _siblings_for_owned_line(
+            conn,
+            card,
+            display_lang=display_lang,
+            siblings_by_set=siblings_by_set,
+            sibling_row_cache=sibling_row_cache,
+        )
         cards.append(
             scryfall_card_to_owned_payload(
                 conn,
@@ -1084,19 +1265,124 @@ def list_owned_collection_cards(conn, *, sort: str = "name_asc", display_lang: s
                 card,
                 display_lang=display_lang,
                 siblings=siblings,
+                include_live_prices=include_live_prices,
             )
         )
-    cards = merge_owned_cards_by_scryfall(cards)
+    return merge_owned_cards_by_scryfall(cards)
+
+
+def _build_owned_cards_for_scryfall_ids(
+    conn,
+    scryfall_ids: set[str],
+    *,
+    display_lang: str,
+    include_live_prices: bool = False,
+) -> list[dict[str, Any]]:
+    parsed_rows = _load_owned_parsed_rows(conn, scryfall_ids)
+    return _build_owned_cards_from_parsed_rows(
+        conn,
+        parsed_rows,
+        display_lang=display_lang,
+        include_live_prices=include_live_prices,
+    )
+
+
+def _build_owned_collection_cards_merged(
+    conn,
+    *,
+    sort: str,
+    display_lang: str,
+    include_live_prices: bool = False,
+) -> list[dict[str, Any]]:
+    parsed_rows = _load_owned_parsed_rows(conn)
+    cards = _build_owned_cards_from_parsed_rows(
+        conn,
+        parsed_rows,
+        display_lang=display_lang,
+        include_live_prices=include_live_prices,
+    )
     sort_cards(cards, sort)
+    return cards
+
+
+def merged_owned_collection_cards(
+    conn,
+    *,
+    sort: str = "name_asc",
+    display_lang: str = "merge",
+) -> list[dict[str, Any]]:
+    cache_key = _owned_collection_cache_key(sort, display_lang)
+    now = time.time()
+    with _OWNED_COLLECTION_CACHE_LOCK:
+        entry = _OWNED_COLLECTION_CACHE.get(cache_key)
+        if entry is not None:
+            cached_at, cards = entry
+            if now - cached_at <= _OWNED_COLLECTION_CACHE_TTL:
+                return cards
+    cards = _build_owned_collection_cards_merged(conn, sort=sort, display_lang=display_lang)
+    with _OWNED_COLLECTION_CACHE_LOCK:
+        _OWNED_COLLECTION_CACHE[cache_key] = (now, cards)
+    return cards
+
+
+def list_owned_collection_cards(
+    conn,
+    *,
+    sort: str = "name_asc",
+    display_lang: str = "merge",
+    limit: int | None = 100,
+    offset: int = 0,
+    filters: Any | None = None,
+    on_progress: Any | None = None,
+    use_index: bool = True,
+) -> dict[str, Any]:
+    if use_index:
+        from .collection_index import MyCollectionFilters, list_owned_from_index
+
+        page_size = limit if limit in MY_COLLECTION_PAGE_SIZES else 100
+        if limit is None:
+            page_size = 100
+        return list_owned_from_index(
+            conn,
+            sort=sort,
+            display_lang=display_lang,
+            limit=page_size,
+            offset=max(0, offset),
+            filters=filters if isinstance(filters, MyCollectionFilters) else MyCollectionFilters(),
+            on_progress=on_progress,
+        )
+
+    cards = merged_owned_collection_cards(conn, sort=sort, display_lang=display_lang)
+    total = len(cards)
+    if limit is None:
+        page_size = total or 1
+        offset = 0
+        page_cards = cards
+    else:
+        page_size = limit if limit in MY_COLLECTION_PAGE_SIZES else 100
+        offset = max(0, offset)
+        if offset >= total and total > 0:
+            offset = max(0, (total - 1) // page_size * page_size)
+        page_cards = cards[offset : offset + page_size]
+    enrich_owned_cards_live_prices(conn, page_cards)
 
     total_cards = sum(card["quantity"] for card in cards)
     total_value = sum(card.get("line_value_eur") or 0 for card in cards)
+    page = (offset // page_size) + 1 if page_size else 1
+    total_pages = max(1, (total + page_size - 1) // page_size) if page_size else 1
 
     return {
         "summary": {
-            "unique_lines": len(cards),
+            "unique_lines": total,
             "total_cards": total_cards,
             "total_value_eur": decimal_to_json(Decimal(str(total_value))),
         },
-        "cards": cards,
+        "cards": page_cards,
+        "pagination": {
+            "total": total,
+            "offset": offset,
+            "page_size": page_size,
+            "page": page,
+            "total_pages": total_pages,
+        },
     }

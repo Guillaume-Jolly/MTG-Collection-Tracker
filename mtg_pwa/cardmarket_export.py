@@ -334,6 +334,50 @@ def cardmarket_product_url(id_product: int, *, foil: bool = False) -> str:
 CARDMARKET_WANTS_URL = "https://www.cardmarket.com/en/Magic/Wants/Lists"
 CARDMARKET_SHOPPING_WIZARD_URL = "https://www.cardmarket.com/en/Magic/Wants/ShoppingWizard"
 
+SHIPPING_PROFILES: dict[str, dict[str, Any]] = {
+    "letter": {"label": "Lettre suivie", "base_eur": 3.5, "per_card_eur": 0.05},
+    "colissimo": {"label": "Colissimo / colis", "base_eur": 6.5, "per_card_eur": 0.02},
+    "bulk": {"label": "Gros lot", "base_eur": 9.0, "per_card_eur": 0.01},
+}
+
+
+def estimate_shipping_eur(card_count: int, profile_key: str = "letter") -> dict[str, Any]:
+    profile = SHIPPING_PROFILES.get(profile_key) or SHIPPING_PROFILES["letter"]
+    count = max(0, int(card_count))
+    amount = round(float(profile["base_eur"]) + float(profile["per_card_eur"]) * count, 2)
+    return {
+        "profile": profile_key if profile_key in SHIPPING_PROFILES else "letter",
+        "label": profile["label"],
+        "card_count": count,
+        "estimated_eur": amount,
+        "disclaimer": (
+            "Estimation heuristique — le port exact depend des vendeurs "
+            "(Shopping Wizard Cardmarket)."
+        ),
+    }
+
+
+def build_order_plan_csv(products: list[dict[str, Any]]) -> str:
+    import csv
+    import io
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["id_product", "name", "set_name", "quantity", "finish", "low_eur", "trend_eur"])
+    for product in products:
+        writer.writerow(
+            [
+                product.get("id_product") or "",
+                product.get("name") or "",
+                product.get("set_name") or "",
+                int(product.get("quantity") or 0),
+                product.get("finish") or "nonfoil",
+                product.get("low"),
+                product.get("trend"),
+            ]
+        )
+    return buffer.getvalue()
+
 
 def build_wants_decklist_line(*, quantity: int, name: str, set_name: str) -> str:
     clean_name = (name or "").strip()
@@ -350,6 +394,7 @@ def build_cardmarket_order_plan(
     finish: str = "nonfoil",
     playset: bool = False,
     display_lang: str = "merge",
+    shipping_profile: str = "letter",
 ) -> dict[str, Any]:
     from .database import batch_cardmarket_latest_guide, cardmarket_product_id_by_scryfall
 
@@ -368,8 +413,10 @@ def build_cardmarket_order_plan(
     decklist_lines: list[str] = []
     products: list[dict[str, Any]] = []
     missing_map: list[str] = []
-    estimated_subtotal = 0.0
+    estimated_subtotal_trend = 0.0
+    estimated_subtotal_low = 0.0
     priced_lines = 0
+    priced_low_lines = 0
     qty_multiplier = 4 if playset else 1
 
     for item in items:
@@ -391,11 +438,19 @@ def build_cardmarket_order_plan(
             item_finish = finish
         guide = guides_by_id.get(scryfall_id)
         trend = None
+        low = None
+        avg7 = None
         if guide and guide.get("metrics"):
-            trend = guide["metrics"].get("trend")
+            metrics = guide["metrics"]
+            trend = metrics.get("trend")
+            low = metrics.get("low")
+            avg7 = metrics.get("avg7")
         if trend is not None:
-            estimated_subtotal += float(trend) * quantity
+            estimated_subtotal_trend += float(trend) * quantity
             priced_lines += quantity
+        if low is not None:
+            estimated_subtotal_low += float(low) * quantity
+            priced_low_lines += quantity
         products.append(
             {
                 "scryfall_id": scryfall_id,
@@ -406,25 +461,43 @@ def build_cardmarket_order_plan(
                 "finish": item_finish,
                 "product_url": cardmarket_product_url(id_product, foil=item_finish == "foil"),
                 "trend": trend,
+                "low": low,
+                "avg7": avg7,
             }
         )
 
+    card_count = priced_lines or sum(int(product.get("quantity") or 0) for product in products) or len(decklist_lines)
+    shipping = estimate_shipping_eur(card_count, shipping_profile)
+    subtotal_trend = round(estimated_subtotal_trend, 2)
+    subtotal_low = round(estimated_subtotal_low, 2)
+    decklist_text = "\n".join(decklist_lines)
+
     return {
-        "decklist_text": "\n".join(decklist_lines),
+        "decklist_text": decklist_text,
         "wants_url": CARDMARKET_WANTS_URL,
         "shopping_wizard_url": CARDMARKET_SHOPPING_WIZARD_URL,
         "products": products,
         "lines_total": len(decklist_lines),
         "products_mapped": len(products),
         "missing_product_map": missing_map,
-        "estimated_subtotal_trend": round(estimated_subtotal, 2),
+        "estimated_subtotal_trend": subtotal_trend,
+        "estimated_subtotal_low": subtotal_low,
         "priced_lines": priced_lines,
+        "priced_low_lines": priced_low_lines,
+        "shipping_estimate": shipping,
+        "shipping_profiles": SHIPPING_PROFILES,
+        "estimated_total_trend": round(subtotal_trend + shipping["estimated_eur"], 2),
+        "estimated_total_low": round(subtotal_low + shipping["estimated_eur"], 2),
         "currency": "EUR",
         "playset": playset,
         "display_lang": display_lang,
+        "exports": {
+            "wants_decklist": decklist_text,
+            "csv": build_order_plan_csv(products),
+        },
         "note": (
             "Cardmarket ne propose pas de lien public pour remplir le panier avec frais de port. "
-            "Copiez la decklist dans Buying > My Wants > Add Decklist, puis ouvrez le Shopping Wizard "
-            "pour obtenir le total avec livraison."
+            "1) Copiez la decklist ci-dessous · 2) My Wants > Add Decklist · 3) Shopping Wizard "
+            "pour le total reel avec livraison multi-vendeurs."
         ),
     }

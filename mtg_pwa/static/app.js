@@ -25,10 +25,12 @@ const CHART_RANGE_OPTIONS = [
 ];
 const CHART_SOURCE_STORAGE_KEY = "mtg_default_chart_source";
 const CHART_PREFS_VERSION_KEY = "mtg_chart_prefs_version";
-const CHART_PREFS_VERSION = "cardmarket-guide-v1";
+const CHART_PREFS_VERSION = "eur-only-v2";
 const CHART_HISTORY_OPTIONS_COLLECTION_KEY = "mtg_chart_history_opts_collection";
 const CHART_HISTORY_OPTIONS_DECK_KEY = "mtg_chart_history_opts_deck";
 const CHART_HISTORY_OPTIONS_MARKET_KEY = "mtg_chart_history_opts_market";
+const MY_COLLECTION_PAGE_SIZE_KEY = "mtg_my_collection_page_size";
+const MY_COLLECTION_PAGE_SIZES = [50, 100, 200, 500];
 const DISPLAY_LANG_STORAGE_KEY = "mtg_display_lang";
 const LEGACY_HISTORY_LANG_STORAGE_KEY = "mtg_card_history_lang";
 const DISPLAY_LANG_OPTIONS = [
@@ -42,11 +44,22 @@ const DEFAULT_CHART_SOURCE = "cardmarket";
 const DEFAULT_CHART_RANGE = "7d";
 const CHART_SOURCE_OPTIONS = [
   { key: "cardmarket", label: "Cardmarket", currency: "EUR", dbSource: "cardmarket-guide" },
-  { key: "cardkingdom", label: "Card Kingdom", currency: "USD", dbSource: "mtgjson-cardkingdom" },
-  { key: "manapool", label: "ManaPool", currency: "USD", dbSource: "mtgjson-manapool" },
-  { key: "tcgplayer", label: "TCGPlayer", currency: "USD", dbSource: "mtgjson-tcgplayer" },
 ];
-const usd = new Intl.NumberFormat("fr-FR", { style: "currency", currency: "USD" });
+
+function readMyCollectionPageSize() {
+  const stored = Number(localStorage.getItem(MY_COLLECTION_PAGE_SIZE_KEY));
+  if (MY_COLLECTION_PAGE_SIZES.includes(stored)) {
+    return stored;
+  }
+  return 100;
+}
+
+function saveMyCollectionPageSize(size) {
+  if (!MY_COLLECTION_PAGE_SIZES.includes(size)) {
+    return;
+  }
+  localStorage.setItem(MY_COLLECTION_PAGE_SIZE_KEY, String(size));
+}
 
 function applyDefaultChartPreferences() {
   const version = localStorage.getItem(CHART_PREFS_VERSION_KEY);
@@ -115,9 +128,6 @@ function formatChartMoney(value, currency = "EUR") {
   if (!Number.isFinite(amount)) {
     return "—";
   }
-  if (currency === "USD") {
-    return usd.format(amount);
-  }
   return money(amount);
 }
 
@@ -132,28 +142,51 @@ function finishLabel(finish) {
 }
 
 function cardAvailableFinishes(card) {
+  const fromApi = [...(card?.available_finishes || []), ...(card?.finishes || [])];
   const valid = ["nonfoil", "foil", "etched"];
   const seen = new Set();
   const finishes = [];
-  for (const finish of [...(card?.available_finishes || []), ...(card?.finishes || [])]) {
+  for (const finish of fromApi) {
     if (!valid.includes(finish) || seen.has(finish)) {
       continue;
     }
     seen.add(finish);
     finishes.push(finish);
   }
-  if (finishes.length) {
-    return finishes;
+  if (!seen.has("foil")) {
+    finishes.push("foil");
   }
-  return [card?.display_finish || "nonfoil"];
+  if (!finishes.length) {
+    return ["nonfoil", "foil"];
+  }
+  return finishes.sort((left, right) => valid.indexOf(left) - valid.indexOf(right));
+}
+
+function finishUnavailableLabel(price, finish) {
+  const reason = price?.unavailable_reason || "";
+  const title =
+    reason === "cardmarket-no-stock" || finish === "foil"
+      ? "Foil indisponible sur Cardmarket : aucun stock (donnees obsoletes)."
+      : "Prix indisponible.";
+  return `<span class="detail-finish-price-na" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">N/A</span>`;
 }
 
 function finishPriceLabel(card, finish) {
   const price = card?.prices_by_finish?.[finish] || (card?.display_finish === finish ? card?.price : null);
-  if (!price || price.price == null) {
-    return "";
+  if (price?.unavailable || (price && price.price == null && price.source === "unavailable")) {
+    return finishUnavailableLabel(price, finish);
   }
-  return `<span class="detail-finish-price">${money(price.price)}</span>`;
+  if (!price || price.price == null) {
+    if (finish === "foil" && card?.foil_availability?.status === "unavailable") {
+      return finishUnavailableLabel({ unavailable_reason: card.foil_availability.reason }, finish);
+    }
+    return finishUnavailableLabel(null, finish);
+  }
+  const duplicateHint =
+    price.duplicate_from_finish === "nonfoil" || price.source === "scryfall-cardmarket-finish-duplicated"
+      ? `<span class="detail-finish-price-hint" title="Pas de prix foil disponible : prix non-foil affiche a la place." aria-label="Pas de prix foil disponible : prix non-foil affiche a la place.">ⓘ</span>`
+      : "";
+  return `<span class="detail-finish-price">${money(price.price)}${duplicateHint}</span>`;
 }
 
 function renderChartSourceGrid(selectedKey) {
@@ -174,9 +207,6 @@ function renderChartSourceGrid(selectedKey) {
 }
 
 function renderChartSourceColumn(selectedKey, interactive = true) {
-  if (interactive) {
-    return renderChartSourceGrid(selectedKey);
-  }
   return `
     <div class="chart-option-grid" role="group" aria-label="Source des prix">
       <button type="button" class="chart-option-tile chart-source-tile is-active" disabled aria-pressed="true">
@@ -220,6 +250,7 @@ function defaultChartHistoryOptions() {
     excludeIlliquid: false,
     speculativePreset: "",
     marketMetric: "trend",
+    marketScope: "all",
   };
 }
 
@@ -356,7 +387,7 @@ function readDisplayLang() {
   if (legacy && DISPLAY_LANG_OPTIONS.some((option) => option.key === legacy)) {
     return legacy;
   }
-  return "merge";
+  return "fr";
 }
 
 function saveDisplayLang(mode) {
@@ -478,9 +509,19 @@ function readChartHistoryOptions(scope = "collection") {
   const key = chartHistoryOptionsKey(scope);
   try {
     const stored = JSON.parse(localStorage.getItem(key) || "{}");
-    return { ...defaultChartHistoryOptions(), ...stored };
+    const base = defaultChartHistoryOptions();
+    if (scope === "market") {
+      base.marketScope = "wishlist";
+      base.excludeIlliquid = true;
+    }
+    return { ...base, ...stored };
   } catch {
-    return defaultChartHistoryOptions();
+    const base = defaultChartHistoryOptions();
+    if (scope === "market") {
+      base.marketScope = "wishlist";
+      base.excludeIlliquid = true;
+    }
+    return base;
   }
 }
 
@@ -509,6 +550,7 @@ function readHistoryOptionsFromRoot(root, scope = "collection") {
     excludeIlliquid: marketHost?.querySelector("[data-market-exclude-illiquid]")?.checked ?? stored.excludeIlliquid,
     speculativePreset: marketHost?.querySelector("[data-market-preset]")?.value ?? stored.speculativePreset ?? "",
     marketMetric: marketHost?.querySelector("[data-market-metric]")?.value ?? stored.marketMetric ?? "trend",
+    marketScope: marketHost?.querySelector("[data-market-scope]")?.value ?? stored.marketScope ?? "all",
   };
 }
 
@@ -549,6 +591,9 @@ function buildHistoryQueryParams(source, options = {}, range = null) {
   }
   if (options.marketMetric && options.marketMetric !== "trend") {
     params.set("market_metric", options.marketMetric);
+  }
+  if (options.marketScope && options.marketScope !== "all") {
+    params.set("scope", options.marketScope);
   }
   return params.toString();
 }
@@ -809,6 +854,7 @@ const state = {
     blockSetSort: "default",
     selectedCardIds: [],
     orderFinish: "nonfoil",
+    viewMode: "section",
   },
   myCollection: {
     sortPrimary: "name_asc",
@@ -820,6 +866,20 @@ const state = {
     chartOptions: readChartHistoryOptions("collection"),
     optionsOpen: false,
     history: null,
+    historyCacheKey: null,
+    historyMode: localStorage.getItem("mtg_collection_history_mode") || "auto",
+    filters: {
+      q: "",
+      set: "",
+      rarity: "",
+      color: "",
+      foilOnly: false,
+      noPrice: false,
+    },
+    pageSize: readMyCollectionPageSize(),
+    pageOffset: 0,
+    activePanel: null,
+    tradeSelection: [],
   },
   market: {
     chartRange: readChartRange(),
@@ -827,7 +887,12 @@ const state = {
     chartOptions: readChartHistoryOptions("market"),
     payload: null,
     loading: false,
+    selectedIds: [],
+    selectMode: false,
+    wishlistIds: [],
   },
+  tradeHave: [],
+  tradeWant: [],
   cardDetail: null,
 };
 
@@ -892,6 +957,9 @@ function switchTab(tab) {
   state.currentTab = tab;
   document.body.classList.toggle("collection-full-width", tab === "collection");
   document.body.classList.toggle("my-collection-full-width", tab === "my-collection");
+  document.body.classList.toggle("wishlist-full-width", tab === "wishlist");
+  document.body.classList.toggle("alerts-full-width", tab === "alerts");
+  document.body.classList.toggle("trade-full-width", tab === "trade");
   document.body.classList.toggle("decks-full-width", tab === "decks");
   document.body.classList.toggle("market-full-width", tab === "market");
   applyDisplayZoom(readStoredDisplayZoom(), { persist: false });
@@ -910,6 +978,15 @@ function switchTab(tab) {
   }
   if (tab === "my-collection") {
     loadMyCollection().catch((error) => toast(error.message));
+  }
+  if (tab === "wishlist") {
+    loadWishlist().catch((error) => toast(error.message));
+  }
+  if (tab === "alerts") {
+    loadAlertsScreen().catch((error) => toast(error.message));
+  }
+  if (tab === "trade") {
+    loadTradeScreen().catch((error) => toast(error.message));
   }
   if (tab === "market") {
     loadMarket().catch((error) => toast(error.message));
@@ -979,13 +1056,21 @@ function priceLabel(price) {
   if (!price) {
     return `<div class="price">Prix EUR indisponible</div>`;
   }
+  if (price.unavailable || (price.price == null && price.source === "unavailable")) {
+    return `<div class="price"><span class="detail-finish-price-na">N/A</span> <span class="meta">${escapeHtml(price.finish || "")}</span></div>`;
+  }
+  const isDuplicatedFoil =
+    price.duplicate_from_finish === "nonfoil" || price.source === "scryfall-cardmarket-finish-duplicated";
   let hint = "";
-  if (price.is_fallback) {
+  if (isDuplicatedFoil) {
+    hint = `<span class="detail-finish-price-hint" title="Pas de prix foil disponible : prix non-foil affiche a la place." aria-label="Pas de prix foil disponible : prix non-foil affiche a la place.">ⓘ</span>`;
+  } else if (price.is_fallback) {
     hint = `<span class="fallback">dernier prix trouve</span>`;
   } else if (String(price.source || "").includes("en-print")) {
     hint = `<span class="fallback">prix version EN</span>`;
   }
-  return `<div class="price">${money(price.price)} <span class="meta">${escapeHtml(price.finish)}</span> ${hint}</div>`;
+  const finishMeta = isDuplicatedFoil ? "nonfoil" : price.finish;
+  return `<div class="price">${money(price.price)} <span class="meta">${escapeHtml(finishMeta)}</span> ${hint}</div>`;
 }
 
 function cardImage(card) {
@@ -1466,11 +1551,36 @@ async function showDeckDetail(fileName, button) {
   }
 }
 
+function renderDeckToBuySection(toBuy) {
+  if (!toBuy?.lines?.length) {
+    return "";
+  }
+  return `
+    <div class="deck-section deck-to-buy">
+      <h3>À acheter (${toBuy.line_count || 0} lignes · ${toBuy.total_cards || 0} cartes · ~${money(toBuy.total_eur || 0)})</h3>
+      <button class="secondary" type="button" data-order-deck-tobuy-cm>Commander sur Cardmarket</button>
+      <ul class="deck-to-buy-list">
+        ${toBuy.lines
+          .slice(0, 60)
+          .map(
+            (line) => `
+          <li class="openable-card" data-card-open data-card-id="${escapeHtml(line.scryfall_id)}" data-finish="${escapeHtml(line.finish || "nonfoil")}" role="button" tabindex="0">
+            ${line.image_url ? `<img class="deck-tobuy-thumb" src="${escapeHtml(line.image_url)}" alt="" loading="lazy" />` : ""}
+            <span><strong>${line.quantity}× ${escapeHtml(line.name)}</strong> · ${escapeHtml(line.finish || "nonfoil")} ${line.unit_price_eur != null ? money(line.unit_price_eur) : "—"}${line.line_total_eur != null ? ` = ${money(line.line_total_eur)}` : ""}</span>
+          </li>`,
+          )
+          .join("")}
+      </ul>
+    </div>
+  `;
+}
+
 function renderDeckPreview(payload) {
   const deck = payload.deck;
   const commanders = payload.commanders || [];
   const cardsBySection = payload.cards_by_section || {};
   const valuation = payload.valuation || {};
+  const toBuy = payload.to_buy || {};
   const commander = commanders[0];
   $("#deckPreview").innerHTML = `
     <section class="panel deck-preview ${deck.owned ? "is-owned" : ""}" data-deck-file="${escapeHtml(deck.file_name || "")}">
@@ -1514,6 +1624,7 @@ function renderDeckPreview(payload) {
         </div>
       </div>
       ${renderDeckHistorySection(valuation)}
+      ${renderDeckToBuySection(toBuy)}
       ${renderDeckSection("Commander", cardsBySection.commander || [])}
       ${renderDeckSection("Main deck", cardsBySection.mainBoard || [])}
       ${renderDeckSection("Sideboard", cardsBySection.sideBoard || [])}
@@ -1546,9 +1657,25 @@ function renderDeckPreview(payload) {
       ...readCardmarketOrderOptionsFrom(deckRoot),
     }).catch((error) => toast(error.message));
   });
+  deckRoot.querySelector("[data-order-deck-tobuy-cm]")?.addEventListener("click", () => {
+    const lines = (toBuy.lines || []).map((line) => ({
+      scryfall_id: line.scryfall_id,
+      quantity: line.quantity,
+      finish: line.finish || "nonfoil",
+    }));
+    if (!lines.length) {
+      toast("Rien à acheter");
+      return;
+    }
+    openCardmarketOrderPlan({ lines, ...readCardmarketOrderOptionsFrom(deckRoot) }).catch((error) => toast(error.message));
+  });
   bindDeckChartInteractions($("#deckPreview"), valuation.history || []);
   bindDeckOwnedToggles($("#deckPreview"));
   bindCardOpen($("#deckPreview"));
+  $("#deckPreview").querySelector("#deckHistoryMode")?.addEventListener("change", (event) => {
+    localStorage.setItem("mtg_deck_history_mode", event.currentTarget.value);
+    loadDeckHistoryChart(deck.file_name).catch((error) => toast(error.message));
+  });
   applyDisplayZoom(readStoredDisplayZoom(), { persist: false });
   loadDeckHistoryChart(deck.file_name).catch((error) => toast(error.message));
   $("#deckPreview").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -1566,10 +1693,19 @@ function renderDeckValuationSummary(valuation) {
 
 function renderDeckHistorySection(valuation) {
   const missingLines = valuation.missing_lines || [];
+  const historyMode = localStorage.getItem("mtg_deck_history_mode") || "auto";
   return `
     <div class="deck-section">
       <h3>Suivi prix du deck</h3>
-      <p class="muted helper-text">Historique MTGJSON + prix Scryfall du jour. Les options filtrent les cartes sans snapshot historique.</p>
+      <p class="muted helper-text">Historique MTGJSON + prix Scryfall du jour.</p>
+      <label class="collection-cards-sort">
+        <span>Mode historique</span>
+        <select id="deckHistoryMode">
+          <option value="auto" ${historyMode === "auto" ? "selected" : ""}>Auto</option>
+          <option value="fast" ${historyMode === "fast" ? "selected" : ""}>Approximatif (rapide)</option>
+          <option value="archive" ${historyMode === "archive" ? "selected" : ""}>Archive complète</option>
+        </select>
+      </label>
       <div id="deckHistoryChart"></div>
       ${
         missingLines.length
@@ -1652,6 +1788,7 @@ async function loadDeckHistoryChart(fileName) {
   state.deckChart.chartOptions = chartOptions;
   host.innerHTML = `<p class="muted">Chargement de l'historique...</p>`;
   const query = buildHistoryQueryParams("cardmarket", chartOptions);
+  query.set("history_mode", localStorage.getItem("mtg_deck_history_mode") || localStorage.getItem("mtg_collection_history_mode") || "auto");
   const payload = await api(`/api/decks/history?file_name=${encodeURIComponent(fileName)}&${query}`);
   state.deckChart.history = payload.history || [];
   renderDeckHistoryChart(host, payload);
@@ -2258,6 +2395,7 @@ async function openCollectionSet(setCode, setName) {
 
 async function openCollectionSection(sectionCode, sectionLabel) {
   state.collectionBrowse.level = "cards";
+  state.collectionBrowse.viewMode = "section";
   state.collectionBrowse.sectionCode = sectionCode;
   state.collectionBrowse.sectionLabel = sectionLabel;
   await showCollectionLevel("cards");
@@ -2542,11 +2680,808 @@ function waitForPaint() {
 
 async function loadCollectionCards() {
   const sort = buildCollectionSortParam();
+  const browse = state.collectionBrowse;
   $("#collectionCardsView").innerHTML = `<div class="panel"><p class="muted">Chargement...</p></div>`;
-  const payload = await api(
-    `/api/collection/${encodeURIComponent(state.collectionBrowse.sectionCode)}/cards?${withDisplayLang({ sort }).toString()}`,
-  );
+  let payload;
+  if (browse.viewMode === "missing") {
+    const setCode = browse.setCode || browse.sectionCode;
+    payload = await api(
+      `/api/collection/missing/${encodeURIComponent(setCode)}?${withDisplayLang({ sort }).toString()}`,
+    );
+    payload.summary = {
+      owned_unique: payload.owned_unique,
+      owned_cards: payload.owned_unique,
+      total_cards: payload.total_cards,
+      owned_value_eur: 0,
+      total_value_eur: 0,
+    };
+    payload.cards = (payload.cards || []).map((card) => ({ ...card, owned: false }));
+  } else {
+    payload = await api(
+      `/api/collection/${encodeURIComponent(browse.sectionCode)}/cards?${withDisplayLang({ sort }).toString()}`,
+    );
+  }
   renderCollectionCards(payload);
+}
+
+async function loadArchiveStatus() {
+  const node = $("#headerArchiveStatus");
+  if (!node) {
+    return;
+  }
+  try {
+    const status = await api("/api/cardmarket/archive-status");
+    const healthy = status.healthy;
+    node.textContent = healthy ? `CM ✓ ${status.archive_days}j` : `CM ⚠ ${status.lag_days || "?"}j retard`;
+    node.classList.toggle("is-warning", !healthy);
+    node.title = `Archive CM : ${status.first_date || "?"} → ${status.last_date || "?"} (${status.archive_days || 0} jours)`;
+  } catch {
+    node.textContent = "";
+  }
+  const dbNode = $("#headerDbStatus");
+  if (!dbNode) {
+    return;
+  }
+  try {
+    const health = await api("/api/health");
+    const db = health.db || {};
+    const gb = db.main_db_gb;
+    const level = db.overall_status || "ok";
+    if (gb != null) {
+      dbNode.textContent = `DB ${Number(gb).toFixed(1)} Go`;
+    } else {
+      dbNode.textContent = "DB —";
+    }
+    dbNode.classList.toggle("is-warning", level === "warning" || level === "info");
+    dbNode.classList.toggle("is-critical", level === "critical");
+    const warnings = (db.warnings || []).map((w) => w.message).join("\n");
+    const backupDue = db.backup_due ? "Backup hebdo a faire" : "Backup hebdo OK";
+    dbNode.title = [backupDue, warnings].filter(Boolean).join("\n") || "Audit base de donnees";
+  } catch {
+    dbNode.textContent = "";
+  }
+}
+
+const MY_COLLECTION_PANELS = [
+  { id: null, label: "Cartes" },
+  { id: "portfolio", label: "Portfolio" },
+  { id: "binder", label: "Binder" },
+  { id: "issues", label: "Problèmes" },
+  { id: "import", label: "Import" },
+];
+
+const BINDER_SLOTS_PER_PAGE = 9;
+const BINDER_GRID_COLUMNS = 3;
+
+function renderWishlistCard(item) {
+  const image = item.image_url
+    ? `<img src="${escapeHtml(item.image_url)}" alt="${escapeHtml(item.name || item.scryfall_id)}" loading="lazy" />`
+    : `<div class="catalog-card-placeholder"></div>`;
+  const priceHtml =
+    item.unit_price_eur != null
+      ? `<span class="catalog-card-price">${money(item.unit_price_eur)}</span>`
+      : `<span class="catalog-card-price muted">—</span>`;
+  const maxPrice =
+    item.max_price_eur != null ? `<span class="wishlist-max-price">max ${money(item.max_price_eur)}</span>` : "";
+  const gapHtml =
+    item.budget_gap_eur != null
+      ? `<span class="wishlist-max-price ${item.under_max ? "is-good" : "is-over"}">${item.under_max ? "sous max" : "au-dessus"} · Δ ${money(item.budget_gap_eur)}</span>`
+      : "";
+  const priority = item.priority ? `<span class="wishlist-priority">P${item.priority}</span>` : "";
+  return `
+    <article class="catalog-card wishlist-card" data-wishlist-id="${item.id}">
+      <div class="catalog-card-image-wrap openable-card" data-card-open data-card-id="${escapeHtml(item.scryfall_id)}" data-finish="${escapeHtml(item.finish || "nonfoil")}" role="button" tabindex="0">
+        <div class="catalog-card-image">${image}</div>
+        ${priority}
+      </div>
+      <div class="catalog-card-body wishlist-card-body">
+        <strong class="wishlist-card-name">${escapeHtml(item.name || item.scryfall_id)}</strong>
+        <span class="muted">${escapeHtml((item.set_code || "").toUpperCase())}${item.collector_number ? ` #${escapeHtml(item.collector_number)}` : ""} · ${escapeHtml(item.finish || "nonfoil")} ×${item.quantity || 1}</span>
+        ${item.notes ? `<span class="wishlist-notes">${escapeHtml(item.notes)}</span>` : ""}
+        <div class="wishlist-card-prices">${priceHtml}${maxPrice}${gapHtml}</div>
+      </div>
+      <div class="wishlist-card-actions">
+        ${item.max_price_eur != null ? `<button class="secondary" type="button" data-wishlist-alert="${escapeHtml(item.scryfall_id)}" data-wishlist-finish="${escapeHtml(item.finish || "nonfoil")}">Alerter ≤ max</button>` : ""}
+        <button class="secondary" type="button" data-wishlist-delete="${item.id}">Retirer</button>
+      </div>
+    </article>
+  `;
+}
+
+async function loadWishlist() {
+  const host = $("#wishlistView");
+  if (!host) {
+    return;
+  }
+  host.innerHTML = `<div class="panel"><p class="muted">Chargement...</p></div>`;
+  const data = await api("/api/wishlist");
+  let items = data.items || [];
+  const sort = state.wishlistSort || localStorage.getItem("mtg_wishlist_sort") || "priority";
+  if (sort === "budget_gap") {
+    items = [...items].sort((a, b) => (a.budget_gap_eur ?? 9999) - (b.budget_gap_eur ?? 9999));
+  } else if (sort === "under_max") {
+    items = [...items].sort((a, b) => Number(b.under_max) - Number(a.under_max));
+  } else if (sort === "name") {
+    items = [...items].sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+  } else {
+    items = [...items].sort((a, b) => (b.priority || 0) - (a.priority || 0));
+  }
+  const totalMax =
+    items.reduce((sum, item) => sum + (item.max_price_eur != null ? item.max_price_eur * (item.quantity || 1) : 0), 0) || null;
+  host.innerHTML = `
+    <div class="panel wishlist-screen">
+      <div class="wishlist-screen-head">
+        <div>
+          <h2>Wishlist</h2>
+          <p class="muted">${items.length} ligne(s)${totalMax ? ` · budget max ~${money(totalMax)}` : ""}</p>
+        </div>
+        <div class="wishlist-screen-actions">
+          <label class="collection-cards-sort">
+            <span>Trier</span>
+            <select id="wishlistSort">
+              <option value="priority" ${sort === "priority" ? "selected" : ""}>Priorité</option>
+              <option value="budget_gap" ${sort === "budget_gap" ? "selected" : ""}>Proche du budget</option>
+              <option value="under_max" ${sort === "under_max" ? "selected" : ""}>Sous le max</option>
+              <option value="name" ${sort === "name" ? "selected" : ""}>Nom</option>
+            </select>
+          </label>
+          <button class="secondary" type="button" id="wishlistOrderCm">Commander sur Cardmarket</button>
+        </div>
+      </div>
+      ${
+        items.length
+          ? `<div class="catalog-card-grid wishlist-grid">${items.map(renderWishlistCard).join("")}</div>`
+          : `<p class="muted">Vide — ajoutez des cartes depuis une fiche (bouton « Ajouter wishlist »).</p>`
+      }
+    </div>
+  `;
+  host.querySelector("#wishlistSort")?.addEventListener("change", (event) => {
+    state.wishlistSort = event.currentTarget.value;
+    localStorage.setItem("mtg_wishlist_sort", state.wishlistSort);
+    loadWishlist().catch((error) => toast(error.message));
+  });
+  applyCatalogCardSize(readStoredDisplayZoom(), { persist: false });
+  bindCardOpen(host);
+  host.querySelectorAll("[data-wishlist-delete]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      await api(`/api/wishlist/${button.dataset.wishlistDelete}`, { method: "DELETE" });
+      toast("Retiré de la wishlist");
+      loadWishlist().catch((error) => toast(error.message));
+    });
+  });
+  host.querySelectorAll("[data-wishlist-alert]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      await api("/api/wishlist/alert", {
+        method: "POST",
+        body: JSON.stringify({ scryfall_id: button.dataset.wishlistAlert, finish: button.dataset.wishlistFinish }),
+      });
+      toast("Alerte créée");
+    });
+  });
+  host.querySelector("#wishlistOrderCm")?.addEventListener("click", () => {
+    if (!items.length) {
+      toast("Wishlist vide");
+      return;
+    }
+    openCardmarketOrderPlan({ from_wishlist: true, only_missing: false }).catch((error) => toast(error.message));
+  });
+}
+
+function renderBinderSlotCell(slot, slotIndex) {
+  if (!slot) {
+    return `<div class="binder-slot binder-slot-empty" data-slot-index="${slotIndex}"><span class="binder-slot-label">${slotIndex}</span></div>`;
+  }
+  const image = slot.image_url
+    ? `<img src="${escapeHtml(slot.image_url)}" alt="" loading="lazy" />`
+    : `<div class="binder-slot-placeholder"></div>`;
+  return `
+    <div class="binder-slot binder-slot-filled openable-card" data-card-open data-card-id="${escapeHtml(slot.scryfall_id)}" data-finish="${escapeHtml(slot.finish || "nonfoil")}" role="button" tabindex="0" title="${escapeHtml(slot.name || slot.scryfall_id)}">
+      <div class="binder-slot-image">${image}</div>
+      <span class="binder-slot-label">${slot.slot_number || slotIndex}</span>
+      <button class="binder-slot-remove secondary" type="button" data-binder-delete="${slot.id}" aria-label="Retirer">×</button>
+    </div>
+  `;
+}
+
+function renderBinderPage(slots, pageNumber) {
+  const pageSlots = slots.filter((slot) => Number(slot.page_number) === pageNumber);
+  const bySlotNumber = new Map(pageSlots.map((slot) => [Number(slot.slot_number), slot]));
+  const cells = [];
+  for (let index = 1; index <= BINDER_SLOTS_PER_PAGE; index += 1) {
+    cells.push(renderBinderSlotCell(bySlotNumber.get(index), index));
+  }
+  return `
+    <div class="binder-page-grid" style="--binder-cols: ${BINDER_GRID_COLUMNS}">
+      ${cells.join("")}
+    </div>
+  `;
+}
+
+function bindBinderPanel(host, root, slots) {
+  let currentPage = 1;
+  if (slots.length) {
+    currentPage = Math.min(...slots.map((slot) => Number(slot.page_number) || 1));
+  }
+  const pages = [...new Set(slots.map((slot) => Number(slot.page_number) || 1))].sort((a, b) => a - b);
+  if (!pages.length) {
+    pages.push(1);
+  }
+  const pageHost = host.querySelector("#binderPageHost");
+  const pageSelect = host.querySelector("#binderPageSelect");
+  const renderPage = () => {
+    if (pageHost) {
+      pageHost.innerHTML = renderBinderPage(slots, currentPage);
+      bindCardOpen(pageHost);
+      pageHost.querySelectorAll("[data-binder-delete]").forEach((button) => {
+        button.addEventListener("click", async (event) => {
+          event.stopPropagation();
+          await api(`/api/binder/${button.dataset.binderDelete}`, { method: "DELETE" });
+          renderMyCollectionSubPanel("binder", root).catch((error) => toast(error.message));
+        });
+      });
+    }
+    if (pageSelect) {
+      pageSelect.value = String(currentPage);
+    }
+  };
+  host.querySelector("#binderPrevPage")?.addEventListener("click", () => {
+    const index = pages.indexOf(currentPage);
+    if (index > 0) {
+      currentPage = pages[index - 1];
+      renderPage();
+    }
+  });
+  host.querySelector("#binderNextPage")?.addEventListener("click", () => {
+    const index = pages.indexOf(currentPage);
+    if (index >= 0 && index < pages.length - 1) {
+      currentPage = pages[index + 1];
+      renderPage();
+    }
+  });
+  pageSelect?.addEventListener("change", () => {
+    currentPage = Number(pageSelect.value) || 1;
+    renderPage();
+  });
+  renderPage();
+}
+
+async function checkPriceAlertsOnStartup() {
+  try {
+    const result = await api("/api/price-alerts/check", { method: "POST" });
+    const hits = result.triggered || [];
+    if (!hits.length) {
+      return;
+    }
+    hits.slice(0, 5).forEach((hit) => {
+      const label = hit.name || hit.scryfall_id;
+      const dir = hit.direction === "below" ? "≤" : "≥";
+      toast(`Alerte : ${label} — ${money(hit.current_eur)} ${dir} ${money(hit.threshold_eur)}`);
+    });
+    if (hits.length > 5) {
+      toast(`${hits.length - 5} autre(s) alerte(s) déclenchée(s)`);
+    }
+  } catch {
+    // silencieux au démarrage
+  }
+}
+
+async function loadAlertsScreen() {
+  const host = $("#alertsView");
+  if (!host) {
+    return;
+  }
+  host.innerHTML = `<div class="panel"><p class="muted">Chargement...</p></div>`;
+  const [alertsData, historyData] = await Promise.all([
+    api("/api/price-alerts"),
+    api("/api/price-alerts/history"),
+  ]);
+  const alerts = alertsData.alerts || [];
+  const events = historyData.events || [];
+  host.innerHTML = `
+    <div class="panel alerts-screen">
+      <div class="alerts-screen-head">
+        <h2>Alertes prix</h2>
+        <button class="secondary" type="button" id="alertsCheckNow">Vérifier maintenant</button>
+      </div>
+      <section class="alerts-section">
+        <h3>Actives (${alerts.length})</h3>
+        ${
+          alerts.length
+            ? `<ul class="alerts-list">${alerts
+                .map(
+                  (alert) => `
+              <li>
+                <span>${escapeHtml(alert.scryfall_id)} · ${escapeHtml(alert.finish)} ${alert.direction === "below" ? "≤" : "≥"} ${money(alert.threshold_eur)}</span>
+                <button class="secondary" type="button" data-alert-delete="${alert.id}">Supprimer</button>
+              </li>`,
+                )
+                .join("")}</ul>`
+            : `<p class="muted">Aucune alerte active — créez-en depuis une fiche carte ou la wishlist.</p>`
+        }
+      </section>
+      <section class="alerts-section">
+        <h3>Historique déclenchées (${events.length})</h3>
+        ${
+          events.length
+            ? `<ul class="alerts-history">${events
+                .map(
+                  (event) => `
+              <li>
+                <strong>${escapeHtml(event.name || event.scryfall_id)}</strong>
+                <span class="muted">${escapeHtml(event.finish)} · ${money(event.triggered_eur)} ${event.direction === "below" ? "≤" : "≥"} ${money(event.threshold_eur)}</span>
+                <span class="muted">${escapeHtml((event.triggered_at || "").slice(0, 16))}</span>
+                ${event.alert_id ? `<button class="secondary" type="button" data-alert-reactivate="${event.alert_id}">Réactiver</button>` : ""}
+              </li>`,
+                )
+                .join("")}</ul>`
+            : `<p class="muted">Aucune alerte déclenchée pour l'instant.</p>`
+        }
+      </section>
+    </div>
+  `;
+  host.querySelector("#alertsCheckNow")?.addEventListener("click", async () => {
+    const result = await api("/api/price-alerts/check", { method: "POST" });
+    const hits = result.triggered || [];
+    toast(hits.length ? `${hits.length} alerte(s) déclenchée(s)` : "Aucune alerte déclenchée");
+    loadAlertsScreen().catch((error) => toast(error.message));
+  });
+  host.querySelectorAll("[data-alert-delete]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await api(`/api/price-alerts/${button.dataset.alertDelete}`, { method: "DELETE" });
+      loadAlertsScreen().catch((error) => toast(error.message));
+    });
+  });
+  host.querySelectorAll("[data-alert-reactivate]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await api(`/api/price-alerts/${button.dataset.alertReactivate}/reactivate`, { method: "POST" });
+      toast("Alerte réactivée");
+      loadAlertsScreen().catch((error) => toast(error.message));
+    });
+  });
+}
+
+function getTradeHaveLines() {
+  if (!state.tradeHave?.length && state.tradeSelection?.length) {
+    state.tradeHave = state.tradeSelection;
+  }
+  if (!state.tradeHave) {
+    state.tradeHave = [];
+  }
+  if (!state.tradeWant) {
+    state.tradeWant = [];
+  }
+  state.tradeSelection = state.tradeHave;
+  return state.tradeHave;
+}
+
+function addTradeWantLine(line) {
+  const want = state.tradeWant || [];
+  const index = want.findIndex((entry) => entry.scryfall_id === line.scryfall_id && entry.finish === (line.finish || "nonfoil"));
+  if (index >= 0) {
+    want[index].quantity = (want[index].quantity || 1) + (line.quantity || 1);
+  } else {
+    want.push({
+      scryfall_id: line.scryfall_id,
+      name: line.name,
+      set_code: line.set_code,
+      set_name: line.set_name,
+      finish: line.finish || "nonfoil",
+      quantity: line.quantity || 1,
+      unit_price_eur: line.unit_price_eur,
+    });
+  }
+  state.tradeWant = want;
+}
+
+function addTradeHaveLine(line) {
+  const have = getTradeHaveLines();
+  const index = have.findIndex((entry) => entry.scryfall_id === line.scryfall_id && entry.finish === (line.finish || "nonfoil"));
+  if (index >= 0) {
+    have[index].quantity = (have[index].quantity || 1) + (line.quantity || 1);
+  } else {
+    have.push({
+      scryfall_id: line.scryfall_id,
+      name: line.name,
+      set_code: line.set_code,
+      set_name: line.set_name,
+      finish: line.finish || "nonfoil",
+      quantity: line.quantity || 1,
+      unit_price_eur: line.unit_price_eur,
+    });
+  }
+  state.tradeHave = have;
+  state.tradeSelection = have;
+}
+
+async function downloadTradeExport(body, filename) {
+  const response = await fetch("/api/trade/export", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    throw new Error("Export trade impossible");
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+async function loadTradeScreen() {
+  const host = $("#tradeView");
+  if (!host) {
+    return;
+  }
+  const have = getTradeHaveLines();
+  const want = state.tradeWant || [];
+  let summary = { have_total_eur: 0, want_total_eur: 0, delta_eur: 0, equity_pct: null };
+  try {
+    summary = await api("/api/trade/summary", {
+      method: "POST",
+      body: JSON.stringify({ have_lines: have, want_lines: want }),
+    });
+  } catch {
+    summary = { have_total_eur: 0, want_total_eur: 0, delta_eur: 0, equity_pct: null };
+  }
+  const equityText =
+    summary.equity_pct != null
+      ? ` · écart ${summary.delta_eur >= 0 ? "+" : ""}${money(summary.delta_eur)} (${summary.equity_pct >= 0 ? "+" : ""}${summary.equity_pct} % côté H)`
+      : summary.delta_eur
+        ? ` · écart ${summary.delta_eur >= 0 ? "+" : ""}${money(summary.delta_eur)}`
+        : "";
+  host.innerHTML = `
+    <div class="panel trade-screen">
+      <h2>Trade / échanges</h2>
+      <p class="muted">Have = ce que vous proposez · Want = ce que vous cherchez. Valeurs indicatives (trend CM).</p>
+      <div class="trade-summary-grid">
+        <div class="trade-summary-card"><span>Have (H)</span><strong>${money(summary.have_total_eur || 0)}</strong><small>${have.length} ligne(s)</small></div>
+        <div class="trade-summary-card"><span>Want (W)</span><strong>${money(summary.want_total_eur || 0)}</strong><small>${want.length} ligne(s)</small></div>
+        <div class="trade-summary-card"><span>Équité trend</span><strong>${money(summary.delta_eur || 0)}</strong><small>${equityText || "—"}</small></div>
+      </div>
+      <div class="form-row trade-export-row">
+        <button class="primary" type="button" id="tradeExportCsv">CSV Have</button>
+        <button class="secondary" type="button" id="tradeExportHw">H:/W: texte</button>
+        <button class="secondary" type="button" id="tradeExportMcm">Decklist CM (Want)</button>
+        <button class="secondary" type="button" id="tradeOrderCm">Commander Want (CM)</button>
+        <button class="secondary" type="button" id="tradeClearHave">Vider Have</button>
+        <button class="secondary" type="button" id="tradeClearWant">Vider Want</button>
+        <button class="secondary" type="button" id="tradeGoCollection">Sélectionner Have</button>
+      </div>
+      <details class="detail-disclosure trade-import-panel">
+        <summary>Importer liste adversaire (texte / decklist)</summary>
+        <p class="muted helper-text">Collez une decklist MCM (<code>1 Nom (SET)</code>) ou un bloc <code>H:</code> / <code>W:</code>.</p>
+        <textarea id="tradeImportText" rows="6" placeholder="W:&#10;1 Lightning Bolt (M10)"></textarea>
+        <div class="form-row">
+          <button class="secondary" type="button" id="tradeImportMatch">Analyser vs collection</button>
+          <button class="secondary" type="button" id="tradeImportToWant">→ Want</button>
+        </div>
+        <div id="tradeImportResult"></div>
+      </details>
+      <div class="trade-lists-grid">
+        <section>
+          <h3>Have (${have.length})</h3>
+          ${have.length ? `<ul class="trade-list">${have.map((line) => `<li>${line.quantity || 1}× ${escapeHtml(line.name || line.scryfall_id)} · ${escapeHtml(line.finish || "nonfoil")}${line.unit_price_eur != null ? ` · ${money(line.unit_price_eur)}` : ""}</li>`).join("")}</ul>` : `<p class="muted">Vide — Ma collection (mode sélection) ou fiche carte.</p>`}
+        </section>
+        <section>
+          <h3>Want (${want.length})</h3>
+          ${want.length ? `<ul class="trade-list">${want.map((line) => `<li>${line.quantity || 1}× ${escapeHtml(line.name || line.scryfall_id)} · ${escapeHtml(line.finish || "nonfoil")}${line.unit_price_eur != null ? ` · ${money(line.unit_price_eur)}` : ""}</li>`).join("")}</ul>` : `<p class="muted">Market (+TW), wishlist ou import.</p>`}
+        </section>
+      </div>
+      <p class="muted helper-text cardmarket-bookmarklet-hint">Astuce CM : copiez la decklist → My Wants → Add Decklist → Shopping Wizard pour le port réel.</p>
+    </div>
+  `;
+  host.querySelector("#tradeExportCsv")?.addEventListener("click", async () => {
+    if (!have.length) {
+      toast("Have vide");
+      return;
+    }
+    await downloadTradeExport({ format: "csv", have_lines: have }, "trade-have.csv");
+  });
+  host.querySelector("#tradeExportHw")?.addEventListener("click", async () => {
+    if (!have.length && !want.length) {
+      toast("Listes vides");
+      return;
+    }
+    await downloadTradeExport({ format: "hw", have_lines: have, want_lines: want }, "trade-hw.txt");
+  });
+  host.querySelector("#tradeExportMcm")?.addEventListener("click", async () => {
+    const lines = want.length ? want : have;
+    if (!lines.length) {
+      toast("Want vide");
+      return;
+    }
+    await downloadTradeExport({ format: "mcm", want_lines: lines }, "trade-want-mcm.txt");
+  });
+  host.querySelector("#tradeOrderCm")?.addEventListener("click", () => {
+    if (!want.length) {
+      toast("Want vide");
+      return;
+    }
+    openCardmarketOrderPlan({
+      lines: want.map((line) => ({
+        scryfall_id: line.scryfall_id,
+        finish: line.finish,
+        quantity: line.quantity || 1,
+      })),
+      only_missing: false,
+    }).catch((error) => toast(error.message));
+  });
+  host.querySelector("#tradeClearHave")?.addEventListener("click", () => {
+    state.tradeHave = [];
+    state.tradeSelection = [];
+    state.myCollection.tradeSelection = [];
+    loadTradeScreen().catch((error) => toast(error.message));
+  });
+  host.querySelector("#tradeClearWant")?.addEventListener("click", () => {
+    state.tradeWant = [];
+    loadTradeScreen().catch((error) => toast(error.message));
+  });
+  host.querySelector("#tradeGoCollection")?.addEventListener("click", () => {
+    state.myCollection.bulkSelectMode = true;
+    switchTab("my-collection");
+    toast("Cochez des cartes puis revenez à Trade");
+  });
+  host.querySelector("#tradeImportMatch")?.addEventListener("click", async () => {
+    const text = host.querySelector("#tradeImportText")?.value || "";
+    if (!text.trim()) {
+      toast("Collez une liste");
+      return;
+    }
+    const result = await api("/api/trade/import-match", { method: "POST", body: JSON.stringify({ text }) });
+    host.querySelector("#tradeImportResult").innerHTML = `
+      <p><strong>${result.matched?.length || 0}</strong> reconnue(s) · ${result.unmatched?.length || 0} non matchée(s)</p>
+      <p class="muted">Dans votre collection : ${result.in_collection?.length || 0} · Manquantes : ${result.not_in_collection?.length || 0}</p>
+      ${(result.not_in_collection || []).slice(0, 15).map((row) => `<div class="muted">${escapeHtml(row.name)} (${escapeHtml(row.set_code || "")}) — vous avez ${row.owned_quantity || 0}/${row.quantity || 1}</div>`).join("")}
+    `;
+    host.dataset.importMatched = JSON.stringify(result.matched || []);
+  });
+  host.querySelector("#tradeImportToWant")?.addEventListener("click", () => {
+    let matched = [];
+    try {
+      matched = JSON.parse(host.dataset.importMatched || "[]");
+    } catch {
+      matched = [];
+    }
+    if (!matched.length) {
+      toast("Analysez d'abord une liste");
+      return;
+    }
+    matched.forEach((line) => addTradeWantLine(line));
+    toast(`${matched.length} ligne(s) ajoutée(s) au Want`);
+    loadTradeScreen().catch((error) => toast(error.message));
+  });
+}
+
+function renderMyCollectionToolsNav(activePanel) {
+  return `
+    <div class="my-collection-tools-nav" role="tablist">
+      ${MY_COLLECTION_PANELS.map(
+        (panel) =>
+          `<button type="button" class="secondary ${activePanel === panel.id ? "active" : ""}" data-mc-panel="${panel.id ?? ""}" role="tab">${escapeHtml(panel.label)}</button>`,
+      ).join("")}
+    </div>
+  `;
+}
+
+async function renderMyCollectionSubPanel(panel, root) {
+  const host = root.querySelector("#myCollectionSubPanel");
+  if (!host) {
+    return;
+  }
+  host.innerHTML = `<p class="muted">Chargement...</p>`;
+  if (panel === "portfolio") {
+    const data = await api("/api/my-collection/portfolio");
+    host.innerHTML = `
+      <section class="panel portfolio-panel">
+        <h3>Portfolio — ${data.total_cards || 0} exemplaires</h3>
+        <div class="portfolio-grid">
+          <div><h4>Par rareté</h4>${Object.entries(data.by_rarity || {})
+            .map(([k, v]) => `<div class="portfolio-row"><span>${escapeHtml(k)}</span><strong>${v}</strong></div>`)
+            .join("")}</div>
+          <div><h4>Par couleur</h4>${Object.entries(data.by_color || {})
+            .map(([k, v]) => `<div class="portfolio-row"><span>${escapeHtml(k)}</span><strong>${v}</strong></div>`)
+            .join("")}</div>
+          <div><h4>Top extensions</h4>${(data.top_sets || [])
+            .map((row) => `<div class="portfolio-row"><span>${escapeHtml(row.set_code)}</span><strong>${row.quantity}</strong></div>`)
+            .join("")}</div>
+        </div>
+      </section>
+    `;
+    return;
+  }
+  if (panel === "binder") {
+    const namesData = await api("/api/binder/names");
+    const binderNames = namesData.names || ["Principal"];
+    const activeBinder = root.dataset.activeBinder || binderNames[0] || "Principal";
+    const data = await api(`/api/binder?binder=${encodeURIComponent(activeBinder)}`);
+    const slots = data.slots || [];
+    const pages = [...new Set(slots.map((slot) => Number(slot.page_number) || 1))].sort((a, b) => a - b);
+    host.innerHTML = `
+      <section class="panel binder-panel">
+        <div class="binder-panel-head">
+          <h3>Binder — ${slots.length} emplacement(s)</h3>
+          <div class="binder-page-nav">
+            <label><span>Binder</span>
+              <select id="binderNameSelect">${binderNames.map((name) => `<option value="${escapeHtml(name)}" ${name === activeBinder ? "selected" : ""}>${escapeHtml(name)}</option>`).join("")}</select>
+            </label>
+            <button class="secondary" type="button" id="binderPrevPage" aria-label="Page précédente">‹</button>
+            <select id="binderPageSelect" aria-label="Page du binder">
+              ${(pages.length ? pages : [1]).map((page) => `<option value="${page}">Page ${page}</option>`).join("")}
+            </select>
+            <button class="secondary" type="button" id="binderNextPage" aria-label="Page suivante">›</button>
+          </div>
+        </div>
+        ${slots.length ? `<div id="binderPageHost"></div>` : `<p class="muted">Vide — ajoutez depuis une fiche carte.</p>`}
+      </section>
+    `;
+    host.querySelector("#binderNameSelect")?.addEventListener("change", (event) => {
+      root.dataset.activeBinder = event.currentTarget.value;
+      renderMyCollectionSubPanel("binder", root).catch((error) => toast(error.message));
+    });
+    if (slots.length) {
+      bindBinderPanel(host, root, slots);
+    }
+    return;
+  }
+  if (panel === "issues") {
+    const data = await api("/api/my-collection/issues");
+    host.innerHTML = `
+      <section class="panel">
+        <h3>Problèmes détectés</h3>
+        <button class="secondary" type="button" id="issuesRefreshPrices">Rafraîchir prix stale (collection)</button>
+        <h4>Doublons (${(data.duplicate_lines || []).length})</h4>
+        <ul>${(data.duplicate_lines || [])
+          .slice(0, 30)
+          .map(
+            (row) => `<li>${escapeHtml(row.scryfall_id)} · ${escapeHtml(row.finish)} (${row.rows_count} lignes, ${row.total_qty} ex.)
+              <button class="secondary" type="button" data-merge-duplicate data-scryfall-id="${escapeHtml(row.scryfall_id)}" data-finish="${escapeHtml(row.finish)}">Fusionner</button></li>`,
+          )
+          .join("")}</ul>
+        <h4>Prix &gt; 30 j (${(data.stale_price_cards || []).length})</h4>
+        <ul>${(data.stale_price_cards || [])
+          .slice(0, 30)
+          .map((row) => `<li>${escapeHtml(row.name || row.scryfall_id)} · ${escapeHtml(row.set_code || "")}</li>`)
+          .join("")}</ul>
+      </section>
+    `;
+    host.querySelector("#issuesRefreshPrices")?.addEventListener("click", async () => {
+      toast("Rafraîchissement des prix…");
+      await refreshMyCollectionPrices(() => {});
+      toast("Prix collection mis à jour");
+      loadMyCollection().catch((error) => toast(error.message));
+    });
+    host.querySelectorAll("[data-merge-duplicate]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        await api("/api/my-collection/merge-duplicate", {
+          method: "POST",
+          body: JSON.stringify({
+            scryfall_id: button.dataset.scryfallId,
+            finish: button.dataset.finish,
+          }),
+        });
+        toast("Doublons fusionnés");
+        renderMyCollectionSubPanel("issues", root).catch((error) => toast(error.message));
+      });
+    });
+    return;
+  }
+  if (panel === "import") {
+    host.innerHTML = `
+      <section class="panel">
+        <h3>Import / export collection</h3>
+        <p class="muted">CSV : scryfall_id, finish, quantity (en-têtes optionnels)</p>
+        <textarea id="collectionImportCsv" rows="8" placeholder="scryfall_id,finish,quantity"></textarea>
+        <div class="form-row">
+          <button class="primary" type="button" id="runCollectionImport">Importer</button>
+          <button class="secondary" type="button" id="downloadCollectionExport">Exporter CSV</button>
+          <button class="secondary" type="button" id="downloadBackupJson">Backup JSON</button>
+        </div>
+      </section>
+    `;
+    host.querySelector("#downloadCollectionExport")?.addEventListener("click", () => {
+      window.open("/api/my-collection/export", "_blank");
+    });
+    host.querySelector("#downloadBackupJson")?.addEventListener("click", async () => {
+      const backup = await api("/api/backup/export");
+      const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `mtg-tracker-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+    });
+    host.querySelector("#runCollectionImport")?.addEventListener("click", async () => {
+      const csv = host.querySelector("#collectionImportCsv")?.value || "";
+      const result = await api("/api/my-collection/import", {
+        method: "POST",
+        body: JSON.stringify({ csv }),
+      });
+      toast(`${result.imported || 0} ligne(s) importée(s), ${result.skipped || 0} ignorée(s)`);
+      loadMyCollection().catch((error) => toast(error.message));
+    });
+    return;
+  }
+}
+
+function toggleTradeCard(card) {
+  const browse = state.myCollection;
+  const lines = getTradeHaveLines();
+  if (!browse.tradeSelection) {
+    browse.tradeSelection = lines;
+  }
+  const index = lines.findIndex((line) => line.scryfall_id === card.scryfall_id && (line.finish || "nonfoil") === (card.finish || "nonfoil"));
+  if (index >= 0) {
+    lines.splice(index, 1);
+    browse.tradeSelection = lines;
+    state.tradeHave = lines;
+    state.tradeSelection = lines;
+    return false;
+  }
+  addTradeHaveLine({
+    scryfall_id: card.scryfall_id,
+    name: card.name,
+    set_code: card.set_code,
+    finish: card.finish || "nonfoil",
+    quantity: card.quantity || 1,
+    unit_price_eur: card.unit_price_eur,
+  });
+  browse.tradeSelection = state.tradeHave;
+  return true;
+}
+
+async function addCardToWishlist(scryfallId, finish = "nonfoil") {
+  await api("/api/wishlist", {
+    method: "POST",
+    body: JSON.stringify({ scryfall_id: scryfallId, finish, quantity: 1 }),
+  });
+  toast("Ajouté à la wishlist");
+}
+
+async function addCardToBinder(scryfallId, finish = "nonfoil") {
+  await api("/api/binder", {
+    method: "POST",
+    body: JSON.stringify({ scryfall_id: scryfallId, finish, page_number: 1, slot_number: 1 }),
+  });
+  toast("Ajouté au binder");
+}
+
+async function createCardPriceAlert(scryfallId, finish, threshold) {
+  await api("/api/price-alerts", {
+    method: "POST",
+    body: JSON.stringify({
+      scryfall_id: scryfallId,
+      finish,
+      direction: "below",
+      threshold_eur: threshold,
+    }),
+  });
+  toast(`Alerte créée ≤ ${money(threshold)}`);
+}
+
+async function openOracleView(oracleId) {
+  if (!oracleId) {
+    return;
+  }
+  const payload = await api(`/api/oracle/${encodeURIComponent(oracleId)}`);
+  const lines = (payload.prints || [])
+    .map((row) => `${row.set_code?.toUpperCase() || "?"} #${row.number || "?"} — ${row.name} ×${row.quantity}`)
+    .join("\n");
+  window.alert(`Oracle — ${payload.total_quantity || 0} ex. · ${money(payload.total_value_eur || 0)}\n\n${lines}`);
+}
+
+async function openCollectionMissing() {
+  state.collectionBrowse.viewMode = "missing";
+  state.collectionBrowse.level = "cards";
+  state.collectionBrowse.sectionCode = state.collectionBrowse.setCode;
+  state.collectionBrowse.sectionLabel = "Manquantes";
+  await showCollectionLevel("cards");
 }
 
 function buildMyCollectionSortParam() {
@@ -2558,10 +3493,63 @@ function buildMyCollectionSortParam() {
   return primary;
 }
 
-async function loadMyCollection() {
+function buildMyCollectionQueryParams() {
   const sort = buildMyCollectionSortParam();
-  $("#myCollectionView").innerHTML = `<div class="panel"><p class="muted">Chargement...</p></div>`;
-  const payload = await api(`/api/my-collection?${withDisplayLang({ sort }).toString()}`);
+  const browse = state.myCollection;
+  const pageSize = browse.pageSize || readMyCollectionPageSize();
+  const offset = browse.pageOffset || 0;
+  const filters = browse.filters || {};
+  const params = withDisplayLang({ sort, page_size: pageSize, offset });
+  if (filters.q) {
+    params.set("q", filters.q);
+  }
+  if (filters.set) {
+    params.set("set", filters.set);
+  }
+  if (filters.rarity) {
+    params.set("rarity", filters.rarity);
+  }
+  if (filters.color) {
+    params.set("color", filters.color);
+  }
+  if (filters.foilOnly) {
+    params.set("foil_only", "1");
+  }
+  if (filters.noPrice) {
+    params.set("no_price", "1");
+  }
+  return params;
+}
+
+async function pollMyCollectionIndexProgress(host) {
+  const statusNode = host?.querySelector("#myCollectionIndexProgress");
+  if (!statusNode) {
+    return;
+  }
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    const status = await api("/api/my-collection/index-status");
+    if (!status.running) {
+      statusNode.textContent = "";
+      return;
+    }
+    const built = status.built || 0;
+    const total = status.total || "?";
+    statusNode.textContent = `Indexation ${built}/${total} cartes...`;
+    await sleep(250);
+  }
+}
+
+async function loadMyCollection() {
+  const params = buildMyCollectionQueryParams();
+  const host = $("#myCollectionView");
+  host.innerHTML = `
+    <div class="panel my-collection-loading">
+      <p class="muted">Chargement...</p>
+      <p class="muted" id="myCollectionIndexProgress"></p>
+    </div>
+  `;
+  pollMyCollectionIndexProgress(host).catch(() => {});
+  const payload = await api(`/api/my-collection?${params.toString()}`);
   renderMyCollection(payload);
 }
 
@@ -2624,39 +3612,96 @@ function formatMoverChange(value, kind, currency = "EUR", negative = false) {
   return `${sign}${formatChartMoney(amount, currency)}`;
 }
 
-function renderMoverRow(card, kind, currency, negativeColumn = false) {
+function collectMarketMoverCards(movers) {
+  const byId = new Map();
+  const keys = [
+    "top_flat_gain",
+    "top_flat_loss",
+    "top_pct_gain",
+    "top_pct_loss",
+    "top_speculative_pct_gain",
+    "top_premium_flat_gain",
+    "top_speculative_picks",
+  ];
+  for (const key of keys) {
+    for (const card of movers?.[key] || []) {
+      if (card?.scryfall_id) {
+        byId.set(card.scryfall_id, card);
+      }
+    }
+  }
+  return [...byId.values()];
+}
+
+function computeShippingEstimate(plan, profileKey) {
+  const profiles = plan.shipping_profiles || {};
+  const profile = profiles[profileKey] || profiles.letter || { base_eur: 3.5, per_card_eur: 0.05, label: "Lettre" };
+  const count = plan.priced_lines || plan.lines_total || 0;
+  const estimated = Math.round((Number(profile.base_eur) + Number(profile.per_card_eur) * count) * 100) / 100;
+  return { ...profile, profile: profileKey, card_count: count, estimated_eur: estimated };
+}
+
+function renderMoverRow(card, kind, currency, negativeColumn = false, options = {}) {
   const change = kind === "pct" ? card.change_pct : card.change_flat;
   const changeClass =
     change > 0 ? "mover-change-up" : change < 0 ? "mover-change-down" : "mover-change-flat";
   const image = card.image_url
     ? `<img class="mover-thumb" src="${card.image_url}" alt="" loading="lazy" />`
     : `<div class="mover-thumb mover-thumb-empty"></div>`;
+  const wishlistIds = options.wishlistIds || new Set();
+  const isWishlist = wishlistIds.has(card.scryfall_id);
+  const isDrop = negativeColumn || change < 0;
+  const wishlistBadge =
+    isWishlist && isDrop ? `<span class="mover-wishlist-badge" title="Wishlist en baisse">Wishlist ↓</span>` : "";
+  const selectMode = Boolean(options.selectMode);
+  const selected = Boolean(options.selectedIds?.has?.(card.scryfall_id));
+  const selectControl = selectMode
+    ? `<input type="checkbox" class="mover-select" data-mover-select data-scryfall-id="${escapeHtml(card.scryfall_id)}" ${selected ? "checked" : ""} aria-label="Sélectionner" />`
+    : "";
+  const metrics = card.cardmarket_metrics || {};
+  const lowTrend =
+    metrics.low != null && metrics.trend != null
+      ? `<span class="muted mover-low-trend">${formatChartMoney(metrics.low, currency)} – ${formatChartMoney(metrics.trend, currency)}</span>`
+      : "";
+  const undervalued =
+    metrics.low != null && metrics.trend != null && Number(metrics.trend) >= Number(metrics.low) * 1.25
+      ? `<span class="mover-undervalued-badge" title="Trend nettement au-dessus du low">Sous-évaluée</span>`
+      : "";
   return `
-    <button
-      type="button"
-      class="mover-row"
-      data-mover-open
-      data-card-id="${escapeHtml(card.scryfall_id)}"
-      data-finish="${escapeHtml(card.finish || "nonfoil")}"
-    >
-      ${image}
-      <span class="mover-copy">
-        <strong>${escapeHtml(card.name || card.scryfall_id)}</strong>
-        <span class="muted">${escapeHtml((card.set_code || "").toUpperCase())} #${escapeHtml(card.collector_number || "")} · ${escapeHtml(card.finish || "nonfoil")}</span>
-        <span class="muted">${formatChartMoney(card.start_price, currency)} → ${formatChartMoney(card.end_price, currency)}</span>
-      </span>
-      <span class="mover-change ${changeClass}">${formatMoverChange(change, kind, currency, negativeColumn)}</span>
-    </button>
+    <div class="mover-row-wrap">
+      ${selectControl}
+      <button
+        type="button"
+        class="mover-row ${selected ? "is-selected" : ""}"
+        data-mover-open
+        data-card-id="${escapeHtml(card.scryfall_id)}"
+        data-finish="${escapeHtml(card.finish || "nonfoil")}"
+      >
+        ${image}
+        <span class="mover-copy">
+          <strong>${escapeHtml(card.name || card.scryfall_id)}</strong>
+          ${wishlistBadge}${undervalued}
+          <span class="muted">${escapeHtml((card.set_code || "").toUpperCase())} #${escapeHtml(card.collector_number || "")} · ${escapeHtml(card.finish || "nonfoil")}</span>
+          <span class="muted">${formatChartMoney(card.start_price, currency)} → ${formatChartMoney(card.end_price, currency)}</span>
+          ${lowTrend}
+        </span>
+        <span class="mover-change ${changeClass}">${formatMoverChange(change, kind, currency, negativeColumn)}</span>
+      </button>
+      <div class="mover-row-actions">
+        <button type="button" class="secondary mover-action-btn" data-mover-wishlist data-scryfall-id="${escapeHtml(card.scryfall_id)}" data-finish="${escapeHtml(card.finish || "nonfoil")}" title="Wishlist">+W</button>
+        <button type="button" class="secondary mover-action-btn" data-mover-trade-want data-scryfall-id="${escapeHtml(card.scryfall_id)}" data-finish="${escapeHtml(card.finish || "nonfoil")}" title="Trade Want">+TW</button>
+      </div>
+    </div>
   `;
 }
 
-function renderMoversColumn(title, cards, currency, kind, negativeColumn = false) {
+function renderMoversColumn(title, cards, currency, kind, negativeColumn = false, options = {}) {
   return `
     <div class="collection-movers-col">
       <span class="collection-movers-col-label">${escapeHtml(title)}</span>
       ${
         cards?.length
-          ? cards.map((card) => renderMoverRow(card, kind, currency, negativeColumn)).join("")
+          ? cards.map((card) => renderMoverRow(card, kind, currency, negativeColumn, options)).join("")
           : `<p class="muted">Aucune carte</p>`
       }
     </div>
@@ -2708,6 +3753,67 @@ function bindCollectionMovers(root) {
   });
 }
 
+function bindMarketMovers(root, moversPayload) {
+  const market = state.market;
+  root.querySelector("[data-market-select-mode]")?.addEventListener("click", () => {
+    market.selectMode = !market.selectMode;
+    if (!market.selectMode) {
+      market.selectedIds = [];
+    }
+    renderMarketScreen(moversPayload || market.payload);
+  });
+  root.querySelector("[data-market-order-visible]")?.addEventListener("click", () => {
+    const cards = collectMarketMoverCards(moversPayload || market.payload);
+    const ids = cards.map((card) => card.scryfall_id).filter(Boolean);
+    if (!ids.length) {
+      toast("Aucun mover visible");
+      return;
+    }
+    openCardmarketOrderPlan({ scryfall_ids: ids, only_missing: false }).catch((error) => toast(error.message));
+  });
+  root.querySelector("[data-market-order-selected]")?.addEventListener("click", () => {
+    const ids = market.selectedIds || [];
+    if (!ids.length) {
+      toast("Sélection vide");
+      return;
+    }
+    openCardmarketOrderPlan({ scryfall_ids: ids, only_missing: false }).catch((error) => toast(error.message));
+  });
+  root.querySelectorAll("[data-mover-select]").forEach((input) => {
+    input.addEventListener("click", (event) => event.stopPropagation());
+    input.addEventListener("change", (event) => {
+      const cardId = event.currentTarget.dataset.scryfallId;
+      const selected = new Set(market.selectedIds || []);
+      if (event.currentTarget.checked) {
+        selected.add(cardId);
+      } else {
+        selected.delete(cardId);
+      }
+      market.selectedIds = [...selected];
+      renderMarketScreen(moversPayload || market.payload);
+    });
+  });
+  root.querySelectorAll("[data-mover-wishlist]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      addCardToWishlist(button.dataset.scryfallId, button.dataset.finish || "nonfoil").catch((error) =>
+        toast(error.message),
+      );
+    });
+  });
+  root.querySelectorAll("[data-mover-trade-want]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      addTradeWantLine({
+        scryfall_id: button.dataset.scryfallId,
+        finish: button.dataset.finish || "nonfoil",
+        quantity: 1,
+      });
+      toast("Ajouté au trade (Want)");
+    });
+  });
+}
+
 const SPECULATIVE_PRESET_OPTIONS = [
   { id: "", label: "Tous signaux" },
   { id: "stable_spike", label: "Spike + stable" },
@@ -2718,6 +3824,14 @@ const SPECULATIVE_PRESET_OPTIONS = [
 function renderMarketFilterOptions(options) {
   return `
     <div data-market-filter-host>
+      <label class="collection-movers-option">
+        <span>Perimetre</span>
+        <select data-market-scope aria-label="Perimetre market">
+          <option value="all" ${options.marketScope === "all" ? "selected" : ""}>Tout le marche</option>
+          <option value="owned" ${options.marketScope === "owned" ? "selected" : ""}>Ma collection</option>
+          <option value="wishlist" ${options.marketScope === "wishlist" ? "selected" : ""}>Ma wishlist</option>
+        </select>
+      </label>
       <label class="collection-movers-option">
         <input type="checkbox" data-market-exclude-illiquid ${options.excludeIlliquid ? "checked" : ""} />
         <span>Exclure illiquides</span>
@@ -2882,7 +3996,7 @@ function renderMarketSpeculativeCard(card, currency) {
   `;
 }
 
-function renderMarketMovers(movers, currency, chartOptions = {}) {
+function renderMarketMovers(movers, currency, chartOptions = {}, marketUi = {}) {
   if (!movers) {
     return "";
   }
@@ -2898,6 +4012,13 @@ function renderMarketMovers(movers, currency, chartOptions = {}) {
     hints.push(`${movers.tracked_cards} cartes avec historique`);
   }
   const filterHint = hints.length ? ` · ${hints.join(" · ")}` : "";
+  const moverOptions = {
+    selectMode: Boolean(marketUi.selectMode),
+    selectedIds: new Set(marketUi.selectedIds || []),
+    wishlistIds: new Set(marketUi.wishlistIds || []),
+  };
+  const visibleCount = collectMarketMoverCards(movers).length;
+  const selectedCount = (marketUi.selectedIds || []).length;
   if (!movers.start_date || !movers.end_date) {
     return `
       <section class="collection-movers market-movers">
@@ -2908,17 +4029,24 @@ function renderMarketMovers(movers, currency, chartOptions = {}) {
   }
   return `
     <section class="collection-movers market-movers">
-      <h4>Variations marche · ${escapeHtml(rangeLabel)}</h4>
+      <div class="market-movers-toolbar">
+        <h4>Variations marche · ${escapeHtml(rangeLabel)}</h4>
+        <div class="market-movers-toolbar-actions">
+          <button type="button" class="secondary" data-market-select-mode>${marketUi.selectMode ? "Fin sélection" : "Mode sélection"}</button>
+          <button type="button" class="secondary" data-market-order-visible>Commander movers (${visibleCount})</button>
+          <button type="button" class="secondary" data-market-order-selected${selectedCount ? "" : " disabled"}>Commander sélection (${selectedCount})</button>
+        </div>
+      </div>
       <p class="muted helper-text">Du ${formatChartDate(movers.start_date)} au ${formatChartDate(movers.end_date)} · non-foil avec prix &gt; 0 au debut et a la fin${filterHint}</p>
       <div class="collection-movers-grid market-movers-grid">
-        ${renderMoversColumn("Hausse (€)", movers.top_flat_gain, currency, "flat")}
-        ${renderMoversColumn("Baisse (€)", movers.top_flat_loss, currency, "flat", true)}
-        ${renderMoversColumn("Hausse (%)", movers.top_pct_gain, currency, "pct")}
-        ${renderMoversColumn("Baisse (%)", movers.top_pct_loss, currency, "pct", true)}
-        ${renderMoversColumn("Specul. (%)", movers.top_speculative_pct_gain, currency, "pct")}
-        ${renderMoversColumn("Premium (€)", movers.top_premium_flat_gain, currency, "flat")}
+        ${renderMoversColumn("Hausse (€)", movers.top_flat_gain, currency, "flat", false, moverOptions)}
+        ${renderMoversColumn("Baisse (€)", movers.top_flat_loss, currency, "flat", true, moverOptions)}
+        ${renderMoversColumn("Hausse (%)", movers.top_pct_gain, currency, "pct", false, moverOptions)}
+        ${renderMoversColumn("Baisse (%)", movers.top_pct_loss, currency, "pct", true, moverOptions)}
+        ${renderMoversColumn("Specul. (%)", movers.top_speculative_pct_gain, currency, "pct", false, moverOptions)}
+        ${renderMoversColumn("Premium (€)", movers.top_premium_flat_gain, currency, "flat", false, moverOptions)}
       </div>
-      <p class="muted helper-text market-movers-legend">Specul. : hausse % sur cartes &lt; 2 € au debut · Premium : hausse € sur cartes ≥ 10 € a la fin</p>
+      <p class="muted helper-text market-movers-legend">Specul. : hausse % sur cartes &lt; 2 € au debut · Premium : hausse € sur cartes ≥ 10 € a la fin · +W = wishlist · +TW = trade want</p>
     </section>
   `;
 }
@@ -2952,9 +4080,16 @@ async function loadMarket() {
       throw new Error("API Market indisponible : redemarrez le serveur Python (run_mvp.py ou launch.bat prod).");
     }
     const payload = await api(`/api/market/movers?${query}`);
+    let wishlistPayload = { items: [] };
+    try {
+      wishlistPayload = await api("/api/wishlist");
+    } catch {
+      wishlistPayload = { items: [] };
+    }
     if (requestId !== marketRequestId) {
       return;
     }
+    market.wishlistIds = (wishlistPayload.items || []).map((item) => item.scryfall_id).filter(Boolean);
     market.payload = payload;
     if (payload.source_key) {
       market.chartSource = payload.source_key;
@@ -2997,9 +4132,14 @@ function renderMarketScreen(payload) {
       trackedCards: payload?.tracked_cards,
     })}
     ${renderMarketSpeculativeSpotlight(payload, currency)}
-    ${renderMarketMovers(payload, currency, chartOptions)}
+    ${renderMarketMovers(payload, currency, chartOptions, {
+      selectMode: market.selectMode,
+      selectedIds: market.selectedIds || [],
+      wishlistIds: market.wishlistIds || [],
+    })}
   `;
   bindCollectionMovers(host);
+  bindMarketMovers(host, payload);
   bindMoversOptions(host, "market", async (nextOptions) => {
     market.chartOptions = nextOptions;
     try {
@@ -3122,12 +4262,6 @@ async function loadMyCollectionHistory(node) {
   if (!chartHost) {
     return;
   }
-  const graphSection = chartHost.querySelector("[data-chart-section]");
-  if (graphSection) {
-    graphSection.innerHTML = `<div class="chart chart-empty"><p class="muted">Chargement...</p></div>`;
-  } else {
-    chartHost.innerHTML = `<p class="muted">Chargement de l'historique...</p>`;
-  }
   const browse = state.myCollection;
   const source = browse.chartSource || readChartSource();
   const chartHostRoot = node.querySelector("#myCollectionHistoryChart");
@@ -3136,29 +4270,107 @@ async function loadMyCollectionHistory(node) {
     : browse.chartOptions || readChartHistoryOptions("collection");
   browse.chartOptions = chartOptions;
   const range = browse.chartRange || readChartRange();
-  const requestId = ++myCollectionHistoryRequestId;
   const query = buildHistoryQueryParams(source, chartOptions, range);
-  const payload = await api(`/api/my-collection/history?${query}`);
+  const historyMode = browse.historyMode || "auto";
+  query.set("history_mode", historyMode);
+  if (browse.history && browse.historyCacheKey === query.toString()) {
+    renderMyCollectionHistoryChart(node, browse.history);
+    return;
+  }
+  const graphSection = chartHost.querySelector("[data-chart-section]");
+  if (graphSection) {
+    graphSection.innerHTML = `<div class="chart chart-empty"><p class="muted">Chargement...</p></div>`;
+  } else {
+    chartHost.innerHTML = `<p class="muted">Chargement de l'historique...</p>`;
+  }
+  const requestId = ++myCollectionHistoryRequestId;
+  let payload = await api(`/api/my-collection/history?${query}`);
+  if (payload.requires_confirmation) {
+    const confirmed = window.confirm(
+      `${payload.message || "Calcul long détecté."}\n\nLancer le calcul archive complet ?`,
+    );
+    if (!confirmed) {
+      browse.historyMode = "fast";
+      localStorage.setItem("mtg_collection_history_mode", "fast");
+      query.set("history_mode", "fast");
+      payload = await api(`/api/my-collection/history?${query}`);
+    } else {
+      query.set("history_mode", "archive");
+      query.set("confirm_archive", "1");
+      payload = await api(`/api/my-collection/history?${query}`);
+    }
+  }
   if (requestId !== myCollectionHistoryRequestId) {
     return;
   }
   if (payload.source_key && payload.source_key !== source) {
     return;
   }
-  state.myCollection.history = payload;
+  browse.history = payload;
+  browse.historyCacheKey = query.toString();
   renderMyCollectionHistoryChart(node, payload);
+}
+
+function renderMyCollectionPagination(meta) {
+  if (!meta || meta.total_pages <= 1) {
+    return "";
+  }
+  const pages = paginationPages(meta.page, meta.total_pages);
+  return `
+    <div class="my-collection-pagination" id="myCollectionPagination">
+      <button class="secondary page-btn" type="button" data-my-collection-page="${meta.page - 1}" ${meta.page <= 1 ? "disabled" : ""} aria-label="Page precedente">&#8249;</button>
+      ${pages
+        .map((entry) =>
+          entry === "..."
+            ? `<span class="page-ellipsis">...</span>`
+            : `<button type="button" class="secondary page-btn ${entry === meta.page ? "active" : ""}" data-my-collection-page="${entry}" ${entry === meta.page ? 'aria-current="page"' : ""}>${entry}</button>`,
+        )
+        .join("")}
+      <button class="secondary page-btn" type="button" data-my-collection-page="${meta.page + 1}" ${meta.page >= meta.total_pages ? "disabled" : ""} aria-label="Page suivante">&#8250;</button>
+    </div>
+  `;
+}
+
+function bindMyCollectionPagination(node, meta) {
+  const pagination = node.querySelector("#myCollectionPagination");
+  if (!pagination || !meta) {
+    return;
+  }
+  pagination.querySelectorAll("[data-my-collection-page]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const page = Number(button.dataset.myCollectionPage);
+      if (Number.isNaN(page) || page < 1 || page > meta.total_pages) {
+        return;
+      }
+      state.myCollection.pageOffset = (page - 1) * meta.page_size;
+      loadMyCollection().catch((error) => toast(error.message));
+    });
+  });
 }
 
 function renderMyCollection(payload) {
   const summary = payload.summary || {};
+  const pagination = payload.pagination || {};
   const browse = state.myCollection;
   const node = $("#myCollectionView");
+  const pageStart = pagination.total ? pagination.offset + 1 : 0;
+  const pageEnd = pagination.total ? Math.min(pagination.offset + pagination.page_size, pagination.total) : 0;
   node.innerHTML = `
     <div class="collection-cards-toolbar my-collection-toolbar">
       <div class="collection-cards-summary">
         ${summary.unique_lines || 0} uniques · ${summary.total_cards || 0} exemplaires · ${money(summary.total_value_eur || 0)}
+        ${pagination.total ? `<span class="muted"> · affichage ${pageStart}-${pageEnd}</span>` : ""}
       </div>
       <div class="collection-cards-controls">
+        <label class="collection-cards-sort">
+          <span>Par page</span>
+          <select id="myCollectionPageSize" aria-label="Cartes par page">
+            ${MY_COLLECTION_PAGE_SIZES.map(
+              (size) =>
+                `<option value="${size}" ${size === (pagination.page_size || browse.pageSize) ? "selected" : ""}>${size}</option>`,
+            ).join("")}
+          </select>
+        </label>
         <button class="secondary my-collection-options-toggle" id="myCollectionOptionsToggle" type="button" aria-expanded="${browse.optionsOpen}">
           Evolution du prix
         </button>
@@ -3181,19 +4393,144 @@ function renderMyCollection(payload) {
         <button class="secondary" id="refreshMyCollectionPrices" type="button">Charger les prix</button>
         ${renderCardmarketOrderOptionsBar()}
         <button class="secondary" id="orderMissingCollectionCardmarket" type="button">Completer (non possedees)</button>
+        <button class="secondary" id="exportMyCollection" type="button">Exporter CSV</button>
+        <button class="secondary" id="myCollectionBulkSelect" type="button">${browse.bulkSelectMode ? "Fin sélection trade" : "Sélection trade"}</button>
       </div>
+    </div>
+    <div class="my-collection-filters panel">
+      <label><span>Recherche</span><input id="myCollectionFilterQ" type="search" value="${escapeHtml(browse.filters?.q || "")}" placeholder="Nom de carte" /></label>
+      <label><span>Set</span><input id="myCollectionFilterSet" type="text" value="${escapeHtml(browse.filters?.set || "")}" placeholder="ex: dsk" /></label>
+      <label><span>Rareté</span>
+        <select id="myCollectionFilterRarity">
+          <option value="">Toutes</option>
+          ${["common", "uncommon", "rare", "mythic", "special"].map((r) => `<option value="${r}" ${browse.filters?.rarity === r ? "selected" : ""}>${r}</option>`).join("")}
+        </select>
+      </label>
+      <label><span>Couleur</span>
+        <select id="myCollectionFilterColor">
+          <option value="">Toutes</option>
+          ${["W", "U", "B", "R", "G", "C"].map((c) => `<option value="${c}" ${browse.filters?.color === c ? "selected" : ""}>${c}</option>`).join("")}
+        </select>
+      </label>
+      <label class="check-row"><input id="myCollectionFilterFoil" type="checkbox" ${browse.filters?.foilOnly ? "checked" : ""} /> Foil seulement</label>
+      <label class="check-row"><input id="myCollectionFilterNoPrice" type="checkbox" ${browse.filters?.noPrice ? "checked" : ""} /> Sans prix</label>
+      <label><span>Historique</span>
+        <select id="myCollectionHistoryMode">
+          <option value="auto" ${browse.historyMode === "auto" ? "selected" : ""}>Auto</option>
+          <option value="fast" ${browse.historyMode === "fast" ? "selected" : ""}>Approximatif (rapide)</option>
+          <option value="archive" ${browse.historyMode === "archive" ? "selected" : ""}>Archive complète</option>
+        </select>
+      </label>
+      <button class="secondary" id="applyMyCollectionFilters" type="button">Appliquer filtres</button>
     </div>
     <div class="panel my-collection-options ${browse.optionsOpen ? "" : "hidden"}" id="myCollectionOptions">
       <h3>Evolution du prix de la collection</h3>
       <p class="muted helper-text">Historique MTGJSON quand disponible, sinon prix Scryfall actuels (meme logique que le total de Ma collection). L'archive quotidienne construit une vraie courbe long terme.</p>
       <div id="myCollectionHistoryChart"></div>
     </div>
-    <div class="catalog-card-grid">
-      ${(payload.cards || []).map((card) => renderCatalogCard(card, { merged: true })).join("")}
+    ${renderMyCollectionToolsNav(browse.activePanel)}
+    <div id="myCollectionSubPanel" class="${browse.activePanel ? "" : "hidden"}"></div>
+    <div class="catalog-card-grid ${browse.activePanel ? "hidden" : ""}" id="myCollectionCardGrid">
+      ${(payload.cards || [])
+        .map((card) => {
+          const tradeLines = state.tradeSelection || browse.tradeSelection || [];
+          const inTrade = tradeLines.some((line) => line.scryfall_id === card.scryfall_id);
+          return renderCatalogCard(card, {
+            merged: true,
+            selectable: browse.bulkSelectMode || browse.activePanel === "trade",
+            selected: inTrade,
+          });
+        })
+        .join("")}
+    </div>
+    <div class="${browse.activePanel ? "hidden" : ""}">
+    ${renderMyCollectionPagination(pagination)}
     </div>
   `;
 
+  if (pagination.page_size) {
+    browse.pageSize = pagination.page_size;
+    saveMyCollectionPageSize(pagination.page_size);
+  }
+  if (typeof pagination.offset === "number") {
+    browse.pageOffset = pagination.offset;
+  }
+
   applyCatalogCardSize(browse.cardSize || readStoredDisplayZoom(), { persist: false });
+  bindMyCollectionPagination(node, pagination);
+
+  node.querySelectorAll("[data-mc-panel]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const panel = button.dataset.mcPanel || null;
+      browse.activePanel = panel || null;
+      if (panel) {
+        renderMyCollectionSubPanel(panel, node).catch((error) => toast(error.message));
+      } else {
+        const sub = node.querySelector("#myCollectionSubPanel");
+        if (sub) {
+          sub.innerHTML = "";
+          sub.classList.add("hidden");
+        }
+        node.querySelector("#myCollectionCardGrid")?.classList.remove("hidden");
+        node.querySelector(".my-collection-pagination")?.parentElement?.classList.remove("hidden");
+      }
+      node.querySelectorAll("[data-mc-panel]").forEach((entry) => {
+        entry.classList.toggle("active", entry.dataset.mcPanel === (panel || ""));
+      });
+    });
+  });
+  if (browse.activePanel) {
+    renderMyCollectionSubPanel(browse.activePanel, node).catch((error) => toast(error.message));
+  }
+
+  if (browse.activePanel === "trade") {
+    node.querySelectorAll("[data-catalog-select]").forEach((input) => {
+      input.addEventListener("change", (event) => {
+        const cardNode = event.currentTarget.closest("[data-card-open]");
+        const cardId = cardNode?.dataset.cardId;
+        const card = (payload.cards || []).find((entry) => entry.scryfall_id === cardId);
+        if (card) {
+          toggleTradeCard(card);
+        }
+      });
+    });
+  }
+
+  node.querySelector("#myCollectionPageSize")?.addEventListener("change", (event) => {
+    const nextSize = Number(event.currentTarget.value);
+    if (!MY_COLLECTION_PAGE_SIZES.includes(nextSize)) {
+      return;
+    }
+    browse.pageSize = nextSize;
+    browse.pageOffset = 0;
+    saveMyCollectionPageSize(nextSize);
+    loadMyCollection().catch((error) => toast(error.message));
+  });
+
+  node.querySelector("#exportMyCollection")?.addEventListener("click", () => {
+    window.open("/api/my-collection/export", "_blank");
+  });
+
+  node.querySelector("#myCollectionBulkSelect")?.addEventListener("click", () => {
+    browse.bulkSelectMode = !browse.bulkSelectMode;
+    loadMyCollection().catch((error) => toast(error.message));
+  });
+
+  node.querySelector("#applyMyCollectionFilters")?.addEventListener("click", () => {
+    browse.filters = {
+      q: node.querySelector("#myCollectionFilterQ")?.value.trim() || "",
+      set: node.querySelector("#myCollectionFilterSet")?.value.trim().toLowerCase() || "",
+      rarity: node.querySelector("#myCollectionFilterRarity")?.value || "",
+      color: node.querySelector("#myCollectionFilterColor")?.value || "",
+      foilOnly: Boolean(node.querySelector("#myCollectionFilterFoil")?.checked),
+      noPrice: Boolean(node.querySelector("#myCollectionFilterNoPrice")?.checked),
+    };
+    browse.historyMode = node.querySelector("#myCollectionHistoryMode")?.value || "auto";
+    localStorage.setItem("mtg_collection_history_mode", browse.historyMode);
+    browse.pageOffset = 0;
+    browse.historyCacheKey = null;
+    loadMyCollection().catch((error) => toast(error.message));
+  });
 
   node.querySelector("#orderMissingCollectionCardmarket")?.addEventListener("click", () => {
     const missingIds = (payload.cards || []).filter((card) => card.scryfall_id && !card.owned).map((card) => card.scryfall_id);
@@ -3237,6 +4574,7 @@ function renderMyCollection(payload) {
     browse.sortPrimary = $("#myCollectionSortPrimary").value;
     browse.sortSecondary = $("#myCollectionSortSecondary").value;
     browse.multiSort = $("#myCollectionMultiSort").checked;
+    browse.pageOffset = 0;
     loadMyCollection().catch((error) => toast(error.message));
   };
 
@@ -3273,7 +4611,8 @@ function renderMyCollection(payload) {
       setCollectionPriceProgress(refresh.cards_total || 0, refresh.cards_total || 1, "Chargement des prix de la collection");
       await new Promise((resolve) => setTimeout(resolve, 800));
       invalidateCollectionBlocksCache();
-      state.myCollection.history = null;
+      browse.history = null;
+      browse.historyCacheKey = null;
       const wasOpen = browse.optionsOpen;
       await loadMyCollection();
       if (wasOpen) {
@@ -3404,12 +4743,31 @@ function formatCatalogPrice(card) {
 }
 
 async function adjustCollectionQty(scryfallId, finish, delta) {
+  state.lastQtyAdjust = { scryfallId, finish, delta, at: Date.now() };
   const payload = await api("/api/collection/adjust", {
     method: "POST",
     body: JSON.stringify({ scryfall_id: scryfallId, finish, delta }),
   });
   renderCollection(payload);
   return payload;
+}
+
+async function undoLastQtyAdjust() {
+  const last = state.lastQtyAdjust;
+  if (!last || Date.now() - last.at > 120000) {
+    toast("Rien à annuler");
+    return;
+  }
+  const payload = await api("/api/collection/adjust", {
+    method: "POST",
+    body: JSON.stringify({ scryfall_id: last.scryfallId, finish: last.finish, delta: -last.delta }),
+  });
+  renderCollection(payload);
+  state.lastQtyAdjust = null;
+  toast("Modification annulée");
+  if (state.currentTab === "my-collection") {
+    loadMyCollection().catch((error) => toast(error.message));
+  }
 }
 
 function renderCollectionSet(payload) {
@@ -3419,6 +4777,7 @@ function renderCollectionSet(payload) {
       <p class="muted">Sous-sections de ${escapeHtml(payload.set?.name || state.collectionBrowse.setName || "")}</p>
       ${renderCardmarketOrderOptionsBar()}
       <button class="secondary" id="orderSetCardmarket" type="button">Commander le set sur Cardmarket</button>
+      <button class="secondary" id="viewSetMissing" type="button">Cartes manquantes</button>
       <button class="secondary" id="refreshSetPrices" type="button">Charger les prix du bloc</button>
     </div>
     <div class="set-section-grid">
@@ -3443,6 +4802,9 @@ function renderCollectionSet(payload) {
       finish: state.collectionBrowse.orderFinish || "nonfoil",
       ...readCardmarketOrderOptionsFrom(node),
     }).catch((error) => toast(error.message));
+  });
+  node.querySelector("#viewSetMissing")?.addEventListener("click", () => {
+    openCollectionMissing().catch((error) => toast(error.message));
   });
   node.querySelector("#refreshSetPrices")?.addEventListener("click", async (event) => {
     const button = event.currentTarget;
@@ -3516,7 +4878,7 @@ function flattenDeckCards(cardsBySection) {
   return Object.values(cardsBySection || {}).flat();
 }
 
-function renderCardmarketOrderModal(plan) {
+function renderCardmarketOrderModal(plan, requestBody = {}) {
   const existing = document.getElementById("cardmarketOrderModal");
   if (existing) {
     existing.remove();
@@ -3524,6 +4886,28 @@ function renderCardmarketOrderModal(plan) {
   const modal = document.createElement("div");
   modal.id = "cardmarketOrderModal";
   modal.className = "cardmarket-order-modal";
+  let activeProfile = requestBody.shipping_profile || plan.shipping_estimate?.profile || "letter";
+
+  function renderTotals(profileKey) {
+    const shipping = computeShippingEstimate(plan, profileKey);
+    const subLow = plan.estimated_subtotal_low ?? 0;
+    const subTrend = plan.estimated_subtotal_trend ?? 0;
+    return `
+      <div class="cardmarket-order-totals">
+        <p><strong>Fourchette cartes :</strong> ${formatChartMoney(subLow, plan.currency || "EUR")} (low) – ${formatChartMoney(subTrend, plan.currency || "EUR")} (trend) · ${plan.priced_lines || 0} ex. tarifés</p>
+        <p><strong>Port estimé (${escapeHtml(shipping.label || profileKey)}) :</strong> ~${formatChartMoney(shipping.estimated_eur, plan.currency || "EUR")} <span class="muted">(${shipping.card_count || 0} cartes — heuristique)</span></p>
+        <p><strong>Total estimé :</strong> ${formatChartMoney(subLow + shipping.estimated_eur, plan.currency || "EUR")} – ${formatChartMoney(subTrend + shipping.estimated_eur, plan.currency || "EUR")} + port</p>
+      </div>
+    `;
+  }
+
+  const profileOptions = Object.entries(plan.shipping_profiles || {})
+    .map(
+      ([key, profile]) =>
+        `<option value="${escapeHtml(key)}" ${key === activeProfile ? "selected" : ""}>${escapeHtml(profile.label || key)}</option>`,
+    )
+    .join("");
+
   modal.innerHTML = `
     <div class="cardmarket-order-dialog" role="dialog" aria-modal="true" aria-labelledby="cardmarketOrderTitle">
       <header class="cardmarket-order-head">
@@ -3531,21 +4915,27 @@ function renderCardmarketOrderModal(plan) {
         <button type="button" class="secondary" data-close-cardmarket-order aria-label="Fermer">×</button>
       </header>
       <p class="muted helper-text">${escapeHtml(plan.note || "")}</p>
-      <p><strong>Estimation trend :</strong> ${formatChartMoney(plan.estimated_subtotal_trend, plan.currency || "EUR")} (${plan.priced_lines || 0} ligne(s) tarifées)</p>
+      <div data-cm-order-totals-host>${renderTotals(activeProfile)}</div>
+      <label class="collection-cards-sort">
+        <span>Profil port (estimation)</span>
+        <select data-cm-shipping-profile aria-label="Profil frais de port">${profileOptions}</select>
+      </label>
       <label class="cardmarket-order-decklist-label">Decklist (My Wants → Add Decklist)</label>
       <textarea class="cardmarket-order-decklist" readonly rows="10">${escapeHtml(plan.decklist_text || "")}</textarea>
       <div class="cardmarket-order-actions">
-        <button type="button" class="secondary" data-copy-cardmarket-decklist>Copier la decklist</button>
-        <a class="button-link" href="${escapeHtml(plan.wants_url)}" target="_blank" rel="noopener noreferrer">My Wants</a>
-        <a class="button-link" href="${escapeHtml(plan.shopping_wizard_url)}" target="_blank" rel="noopener noreferrer">Shopping Wizard</a>
+        <button type="button" class="primary" data-copy-cardmarket-decklist>Copier decklist</button>
+        <button type="button" class="secondary" data-copy-cardmarket-csv>Copier CSV</button>
+        <a class="button-link primary" href="${escapeHtml(plan.shopping_wizard_url)}" target="_blank" rel="noopener noreferrer">Shopping Wizard</a>
+        <a class="button-link secondary" href="${escapeHtml(plan.wants_url)}" target="_blank" rel="noopener noreferrer">My Wants</a>
+        <button type="button" class="secondary" data-open-cm-products ${(plan.products || []).length ? "" : "disabled"}>Ouvrir produits CM (max 10)</button>
       </div>
       ${
         (plan.products || []).length
-          ? `<details class="detail-disclosure"><summary>${plan.products_mapped || 0} produit(s) lié(s)</summary><ul class="cardmarket-order-products">${plan.products
+          ? `<details class="detail-disclosure" open><summary>${plan.products_mapped || 0} produit(s) lié(s)</summary><ul class="cardmarket-order-products">${plan.products
               .slice(0, 40)
               .map(
                 (product) =>
-                  `<li><a href="${escapeHtml(product.product_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(product.name)}</a> · ${formatChartMoney(product.trend, plan.currency || "EUR")}</li>`,
+                  `<li><a href="${escapeHtml(product.product_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(product.name)}</a> · ${product.quantity || 1}× · ${product.low != null ? `${formatChartMoney(product.low, plan.currency || "EUR")} – ` : ""}${formatChartMoney(product.trend, plan.currency || "EUR")}</li>`,
               )
               .join("")}</ul></details>`
           : ""
@@ -3553,6 +4943,15 @@ function renderCardmarketOrderModal(plan) {
     </div>
   `;
   document.body.appendChild(modal);
+
+  const totalsHost = modal.querySelector("[data-cm-order-totals-host]");
+  modal.querySelector("[data-cm-shipping-profile]")?.addEventListener("change", (event) => {
+    activeProfile = event.currentTarget.value;
+    if (totalsHost) {
+      totalsHost.innerHTML = renderTotals(activeProfile);
+    }
+  });
+
   modal.addEventListener("click", (event) => {
     if (event.target === modal) {
       modal.remove();
@@ -3562,10 +4961,29 @@ function renderCardmarketOrderModal(plan) {
   modal.querySelector("[data-copy-cardmarket-decklist]")?.addEventListener("click", async () => {
     try {
       await navigator.clipboard.writeText(plan.decklist_text || "");
-      toast("Decklist copiée");
+      toast("Decklist copiée — collez dans My Wants > Add Decklist");
     } catch (error) {
       toast(error.message || "Copie impossible");
     }
+  });
+  modal.querySelector("[data-copy-cardmarket-csv]")?.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(plan.exports?.csv || "");
+      toast("CSV copié");
+    } catch (error) {
+      toast(error.message || "Copie impossible");
+    }
+  });
+  modal.querySelector("[data-open-cm-products]")?.addEventListener("click", () => {
+    const urls = (plan.products || []).slice(0, 10).map((product) => product.product_url).filter(Boolean);
+    if (!urls.length) {
+      toast("Aucun produit");
+      return;
+    }
+    if (urls.length > 5 && !window.confirm(`Ouvrir ${urls.length} onglets Cardmarket ?`)) {
+      return;
+    }
+    urls.forEach((url) => window.open(url, "_blank", "noopener,noreferrer"));
   });
 }
 
@@ -3597,6 +5015,7 @@ function renderCollectionCards(payload) {
   const browse = state.collectionBrowse;
   const selectedIds = new Set(browse.selectedCardIds || []);
   const sectionCode = browse.sectionCode || browse.setCode;
+  const isMissingView = browse.viewMode === "missing";
   const node = $("#collectionCardsView");
   const unavailable = payload.unavailable
     ? `<div class="panel"><p class="muted">Catalogue indisponible pour cette section (donnees MTGJSON absentes).</p></div>`
@@ -3604,8 +5023,12 @@ function renderCollectionCards(payload) {
   node.innerHTML = `
     <div class="collection-cards-toolbar">
       <div class="collection-cards-summary">
-        ${summary.owned_unique || 0} (${summary.owned_cards || 0}) / ${summary.total_cards || 0} cartes -
-        ${money(summary.owned_value_eur || 0)} / ${money(summary.total_value_eur || 0)}
+        ${
+          isMissingView
+            ? `${payload.missing_count || 0} manquante(s) / ${payload.total_cards || 0} — coût ~${money(payload.estimated_cost_eur || 0)} (${payload.priced_missing_count || 0} avec prix) — ${escapeHtml(payload.set_name || "")}`
+            : `${summary.owned_unique || 0} (${summary.owned_cards || 0}) / ${summary.total_cards || 0} cartes -
+        ${money(summary.owned_value_eur || 0)} / ${money(summary.total_value_eur || 0)}`
+        }
       </div>
       <div class="collection-cards-controls">
         ${renderCardmarketOrderOptionsBar()}
@@ -3619,7 +5042,7 @@ function renderCollectionCards(payload) {
             <option value="foil" ${browse.orderFinish === "foil" ? "selected" : ""}>Foil</option>
           </select>
         </label>
-        <button class="secondary" type="button" id="orderSectionCardmarket">Commander la section</button>
+        <button class="secondary" type="button" id="orderSectionCardmarket">${isMissingView ? "Commander les manquantes (CM)" : "Commander la section"}</button>
         <button class="secondary" type="button" id="orderSelectionCardmarket">Commander la sélection (${selectedIds.size})</button>
         <label class="collection-cards-sort">
           <span>Trier</span>
@@ -3660,7 +5083,9 @@ function renderCollectionCards(payload) {
   });
   node.querySelector("#orderSectionCardmarket")?.addEventListener("click", () => {
     openCardmarketOrderPlan({
-      section_code: sectionCode,
+      ...(isMissingView
+        ? { scryfall_ids: (payload.cards || []).map((card) => card.scryfall_id).filter(Boolean), only_missing: true }
+        : { section_code: sectionCode, only_missing: false }),
       finish: browse.orderFinish || "nonfoil",
       ...readCardmarketOrderOptionsFrom(node),
     }).catch((error) => toast(error.message));
@@ -3781,15 +5206,30 @@ function renderCollectionCards(payload) {
   bindCardOpen(node);
 }
 
+function priceSourceLabel(source) {
+  const labels = {
+    scryfall_live: "Scryfall",
+    snapshot: "Archive",
+    snapshot_fallback: "Snapshot EN",
+    cardmarket: "CM trend",
+    mtgjson: "MTGJSON",
+    none: "N/A",
+  };
+  return labels[source] || source || "";
+}
+
 function renderCatalogCardPrice(card) {
   const nonfoil = card.price_nonfoil;
   const foil = card.price_foil;
+  const sourceBadge = card.price_source
+    ? `<span class="catalog-card-price-source" title="Source du prix">${escapeHtml(priceSourceLabel(card.price_source))}</span>`
+    : "";
   if (nonfoil != null && foil != null) {
     const title = `${money(nonfoil)} · ${money(foil)}`;
-    return `<span class="catalog-card-price catalog-card-price-dual" title="${escapeHtml(title)}"><span class="catalog-card-price-line">${money(nonfoil)}</span><span class="catalog-card-price-line">${money(foil)}</span></span>`;
+    return `<span class="catalog-card-price catalog-card-price-dual" title="${escapeHtml(title)}"><span class="catalog-card-price-line">${money(nonfoil)}</span><span class="catalog-card-price-line">${money(foil)}</span>${sourceBadge}</span>`;
   }
   const text = formatCatalogPrice(card);
-  return `<span class="catalog-card-price" title="${escapeHtml(text)}">${text}</span>`;
+  return `<span class="catalog-card-price" title="${escapeHtml(text)}">${text}${sourceBadge}</span>`;
 }
 
 function parseFinishBreakdown(raw) {
@@ -4035,6 +5475,7 @@ function renderCardDetail(payload) {
           card.display_finish || cardAvailableFinishes(card)[0],
           payload.catalog_blocks || [],
           payload.finish_variants || [],
+          payload.cardmarket_insights,
         )}
         ${renderDetailOtherPrintingsMini(
           payload.other_printings || [],
@@ -4384,14 +5825,15 @@ function renderMtgjsonStatus(mtgjson) {
 }
 
 function renderMarkets(markets) {
-  if (!markets.length) {
+  const eurMarkets = (markets || []).filter((market) => market.currency === "EUR");
+  if (!eurMarkets.length) {
     return "";
   }
   return `
     <section class="detail-section">
-      <h3>Sources de prix MTGJSON</h3>
+      <h3>Sources de prix</h3>
       <div class="market-grid">
-        ${markets
+        ${eurMarkets
           .map(
             (market) => `
               <article>
@@ -4549,12 +5991,6 @@ function formatCompactMoney(value, currency = "EUR") {
   const amount = Number(value);
   if (!Number.isFinite(amount)) {
     return "—";
-  }
-  if (currency === "USD") {
-    if (amount >= 100) {
-      return `${amount.toFixed(0)} $`;
-    }
-    return usd.format(amount);
   }
   if (amount >= 100) {
     return `${amount.toFixed(0)} €`;
@@ -4988,14 +6424,65 @@ function resolveDetailFinishContext(card, collection = {}, selectedFinish = null
   };
 }
 
-function renderDetailHeroAside(card, details, collection, selectedFinish, catalogBlocks, finishVariants) {
+function renderDetailHeroCardmarket(insights, activeFinish = "nonfoil") {
+  if (!insights) {
+    return "";
+  }
+  const finishMetrics = activeFinish === "foil" && insights.foil ? insights.foil : insights.nonfoil;
+  const finishLabel = activeFinish === "foil" && insights.foil ? "Foil" : "Non-foil";
+  const metricsBlock = renderCardmarketMetrics(finishMetrics, "EUR");
+  const foilUnavailable = insights.foil_status === "unavailable";
+  const foilMetricsHtml = insights.foil
+    ? renderCardmarketMetrics(insights.foil, "EUR")
+    : finishUnavailableLabel({ unavailable_reason: "cardmarket-no-stock" }, "foil");
+  const foilHint = foilUnavailable
+    ? `<small class="detail-hero-cm-unavailable muted">Aucun stock MCM (donnees figees)</small>`
+    : "";
+  const foilBlock =
+    activeFinish !== "foil"
+      ? `
+        <div class="detail-hero-cm-finish">
+          <span class="detail-hero-cm-finish-label">Foil (CM)</span>
+          ${foilMetricsHtml}
+          ${foilHint}
+        </div>
+      `
+      : finishUnavailable && activeFinish === "foil"
+        ? `
+        <small class="detail-hero-cm-unavailable muted">Aucun stock MCM (donnees figees)</small>
+      `
+        : "";
+  return `
+    <aside class="detail-hero-cm" aria-label="Guide Cardmarket">
+      <div class="detail-hero-cm-head">
+        <span class="detail-aside-label">Cardmarket</span>
+        <span class="muted">${escapeHtml(insights.snapshot_date || "—")}</span>
+      </div>
+      <div class="detail-hero-cm-product muted">Produit #${escapeHtml(String(insights.id_product || "—"))} · ${escapeHtml(finishLabel)}</div>
+      ${metricsBlock}
+      ${foilBlock}
+      ${
+        insights.product_url
+          ? `<a class="detail-hero-cm-link" href="${escapeHtml(insights.product_url)}" target="_blank" rel="noopener noreferrer">Ouvrir sur CM</a>`
+          : ""
+      }
+    </aside>
+  `;
+}
+
+function renderDetailHeroAside(card, details, collection, selectedFinish, catalogBlocks, finishVariants, cardmarketInsights) {
   const { activeFinish } = resolveDetailFinishContext(card, collection, selectedFinish, finishVariants);
   return `
     <div class="detail-hero-aside">
-      <h3>${escapeHtml(card.printed_name || card.name)}</h3>
-      <div class="meta">${escapeHtml(card.set_name || card.set || "")} #${escapeHtml(card.collector_number || "")}</div>
-      <div class="meta">${escapeHtml(details.type_line || details.printed_type_line || "")}</div>
-      ${priceLabel(card.price)}
+      <div class="detail-hero-aside-top">
+        <div class="detail-hero-copy">
+          <h3>${escapeHtml(card.printed_name || card.name)}</h3>
+          <div class="meta">${escapeHtml(card.set_name || card.set || "")} #${escapeHtml(card.collector_number || "")}</div>
+          <div class="meta">${escapeHtml(details.type_line || details.printed_type_line || "")}</div>
+          ${priceLabel(card.price)}
+        </div>
+        ${renderDetailHeroCardmarket(cardmarketInsights, activeFinish)}
+      </div>
       <div class="detail-hero-collection" data-detail-collection-compact>
         ${renderDetailCollectionCompact(card, activeFinish, collection)}
       </div>
@@ -5005,14 +6492,24 @@ function renderDetailHeroAside(card, details, collection, selectedFinish, catalo
 }
 
 function renderDetailCollectionCompact(card, activeFinish, collection = {}) {
-  const finishes = ["nonfoil", "foil", "etched"].filter((finish) => cardAvailableFinishes(card).includes(finish));
-  const ownedFinishes = finishes.filter((finish) => Number(collection[finish] || 0) > 0);
-  const rows = ownedFinishes.length ? ownedFinishes : [activeFinish];
+  const finishes = cardAvailableFinishes(card);
 
   return `
     <div class="detail-aside-section">
       <span class="detail-aside-label">Collection</span>
-      ${rows
+      <div class="detail-card-actions">
+        <button class="secondary" type="button" data-detail-wishlist>Ajouter wishlist</button>
+        <button class="secondary" type="button" data-detail-trade-have>Trade Have</button>
+        <button class="secondary" type="button" data-detail-trade-want>Trade Want</button>
+        <button class="secondary" type="button" data-detail-binder>Binder</button>
+        <button class="secondary" type="button" data-detail-alert>Alerte prix</button>
+        ${
+          card.oracle_id
+            ? `<button class="secondary" type="button" data-detail-oracle>Voir oracle</button>`
+            : ""
+        }
+      </div>
+      ${finishes
         .map((finish) => {
           const quantity = Number(collection[finish] || 0);
           return `
@@ -5288,6 +6785,52 @@ function bindCardDetailInteractions(root, payload) {
   );
 
   bindDetailCollectionControls(root, payload);
+
+  root.querySelector("[data-detail-wishlist]")?.addEventListener("click", () => {
+    addCardToWishlist(payload.card.id, defaultFinish).catch((error) => toast(error.message));
+  });
+  root.querySelector("[data-detail-trade-have]")?.addEventListener("click", () => {
+    addTradeHaveLine({
+      scryfall_id: payload.card.id,
+      name: payload.card.name,
+      set_code: payload.card.set_code,
+      set_name: payload.card.set_name,
+      finish: defaultFinish,
+      quantity: 1,
+      unit_price_eur: payload.card.price?.amount,
+    });
+    toast("Ajouté au trade (Have)");
+  });
+  root.querySelector("[data-detail-trade-want]")?.addEventListener("click", () => {
+    addTradeWantLine({
+      scryfall_id: payload.card.id,
+      name: payload.card.name,
+      set_code: payload.card.set_code,
+      set_name: payload.card.set_name,
+      finish: defaultFinish,
+      quantity: 1,
+      unit_price_eur: payload.card.price?.amount,
+    });
+    toast("Ajouté au trade (Want)");
+  });
+  root.querySelector("[data-detail-binder]")?.addEventListener("click", () => {
+    addCardToBinder(payload.card.id, defaultFinish).catch((error) => toast(error.message));
+  });
+  root.querySelector("[data-detail-alert]")?.addEventListener("click", () => {
+    const raw = window.prompt("Alerte si prix ≤ (EUR) :", String(payload.card.price?.amount || "5"));
+    if (raw == null) {
+      return;
+    }
+    const threshold = Number(raw.replace(",", "."));
+    if (!Number.isFinite(threshold) || threshold <= 0) {
+      toast("Montant invalide");
+      return;
+    }
+    createCardPriceAlert(payload.card.id, defaultFinish, threshold).catch((error) => toast(error.message));
+  });
+  root.querySelector("[data-detail-oracle]")?.addEventListener("click", () => {
+    openOracleView(payload.card.oracle_id).catch((error) => toast(error.message));
+  });
 }
 
 function formatChange(period, currency = "EUR") {
@@ -5478,19 +7021,47 @@ $("#prevCard").addEventListener("click", () => navigateCardDetail(-1));
 $("#nextCard").addEventListener("click", () => navigateCardDetail(1));
 
 document.addEventListener("keydown", (event) => {
-  if (state.currentTab !== "prices") {
+  if (state.currentTab === "my-collection" && !event.target.closest("input, textarea, select")) {
+    const cardNode = document.activeElement?.closest?.("[data-card-open][data-card-id]");
+    if (cardNode && (event.key === "+" || event.key === "=")) {
+      event.preventDefault();
+      cardNode.querySelector("[data-qty-delta='1']")?.click();
+      return;
+    }
+    if (cardNode && event.key === "-") {
+      event.preventDefault();
+      cardNode.querySelector("[data-qty-delta='-1']")?.click();
+      return;
+    }
+  }
+  if (event.target.closest("input, textarea, select") && event.key !== "Escape") {
     return;
   }
-  if (event.target.closest("input, textarea, select")) {
+  if (event.key === "/" && state.currentTab !== "search") {
+    event.preventDefault();
+    switchTab("search");
+    $("#searchInput")?.focus();
     return;
   }
-  if (event.key === "ArrowLeft") {
+  if (event.key === "?" && !event.ctrlKey && !event.metaKey) {
     event.preventDefault();
-    navigateCardDetail(-1);
+    $("#shortcutsDialog")?.showModal?.();
+    return;
   }
-  if (event.key === "ArrowRight") {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
     event.preventDefault();
-    navigateCardDetail(1);
+    undoLastQtyAdjust().catch((error) => toast(error.message));
+    return;
+  }
+  if (state.currentTab === "prices") {
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      navigateCardDetail(-1);
+    }
+    if (event.key === "ArrowRight") {
+      event.preventDefault();
+      navigateCardDetail(1);
+    }
   }
 });
 
@@ -5506,11 +7077,13 @@ runStartupSplash()
       versionNode.textContent = window.MTG_APP_VERSION;
     }
     loadCollection().catch((error) => toast(error.message));
+    loadArchiveStatus().catch(() => {});
     initDisplayZoom();
     bindGlobalDisplayLangControl();
     syncGlobalDisplayLangUi();
     pollPreloadStatus();
     pollPriceArchiveStatus().catch(() => {});
+    checkPriceAlertsOnStartup().catch(() => {});
   });
 
 let chartPanelResizeFrame = null;

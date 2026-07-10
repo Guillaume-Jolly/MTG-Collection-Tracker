@@ -69,12 +69,17 @@
           <strong id="headerTotalValue">0,00 €</strong>
           <span class="header-stat-sub" id="headerUniqueValue">0,00 €</span>
         </div>
+        <div class="header-stat header-stat-archive" id="headerArchiveStatus" title="Archive Cardmarket"></div>
+        <div class="header-stat header-stat-db" id="headerDbStatus" title="Taille base de donnees"></div>
       </div>
     </header>
 
     <nav class="tabs" aria-label="Navigation principale">
       <button class="tab active" data-tab="search">Recherche</button>
       <button class="tab" data-tab="my-collection">Ma collection</button>
+      <button class="tab" data-tab="wishlist">Wishlist</button>
+      <button class="tab" data-tab="alerts">Alertes</button>
+      <button class="tab" data-tab="trade">Trade</button>
       <button class="tab" data-tab="collection">Extensions</button>
       <button class="tab" data-tab="decks">Decks</button>
       <button class="tab" data-tab="market">Market</button>
@@ -142,6 +147,18 @@
 
       <section class="screen" id="screen-my-collection">
         <div id="myCollectionView"></div>
+      </section>
+
+      <section class="screen" id="screen-wishlist">
+        <div id="wishlistView"></div>
+      </section>
+
+      <section class="screen" id="screen-alerts">
+        <div id="alertsView"></div>
+      </section>
+
+      <section class="screen" id="screen-trade">
+        <div id="tradeView"></div>
       </section>
 
       <section class="screen" id="screen-market">
@@ -236,6 +253,20 @@
         </div>
       </section>
     </main>
+
+    <dialog class="shortcuts-dialog" id="shortcutsDialog">
+      <form method="dialog">
+        <h2>Raccourcis clavier</h2>
+        <ul class="shortcuts-list">
+          <li><kbd>/</kbd> — focus recherche</li>
+          <li><kbd>←</kbd> <kbd>→</kbd> — fiche carte préc./suiv.</li>
+          <li><kbd>+</kbd> <kbd>-</kbd> — qty Ma collection (carte focus)</li>
+          <li><kbd>Ctrl</kbd>+<kbd>Z</kbd> — annuler dernière modif qty</li>
+          <li><kbd>?</kbd> — cette aide</li>
+        </ul>
+        <button class="primary" type="submit">Fermer</button>
+      </form>
+    </dialog>
 
     <div id="toast" role="status" aria-live="polite"></div>
     <script src="/app.js?v=detail-printing-click-v1" type="module"></script>

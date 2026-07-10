@@ -29,6 +29,8 @@ from .database import (
     cardmarket_guide_multi_series,
     cardmarket_mapping_stats,
     cardmarket_product_id_by_scryfall,
+    cardmarket_product_insights,
+    resolve_cardmarket_scryfall_id,
     card_summary,
     catalog_table,
     cached_mtgjson_price_entry,
@@ -86,9 +88,11 @@ from .price_sync import mtgjson_snapshots_need_sync
 from .prices import FINISH_ORDER, PricePoint, available_finishes_for_card, chart_price_source, current_eur_price
 from .sets_catalog import (
     COLLECTION_CATALOG_VERSION,
+    MY_COLLECTION_PAGE_SIZES,
     blocks_catalog,
     enrich_blocks_with_collection,
     enrich_sections_with_stats,
+    invalidate_owned_collection_cache,
     set_cards,
     list_owned_collection_cards,
     owned_scryfall_ids,
@@ -144,6 +148,19 @@ ARCHIVE_STATUS: dict[str, Any] = {
     "last_cardmarket_archive_finished_at": None,
 }
 ARCHIVE_LOCK = threading.Lock()
+WEEKLY_BACKUP_STATUS: dict[str, Any] = {
+    "running": False,
+    "phase": "idle",
+    "message": None,
+    "started_at": None,
+    "finished_at": None,
+    "error": None,
+    "skipped": False,
+    "rows_incremental": 0,
+    "rows_snapshot": 0,
+    "backup_size_gb": None,
+}
+WEEKLY_BACKUP_LOCK = threading.Lock()
 STARTUP_STATUS: dict[str, Any] = {
     "running": False,
     "phase": "idle",
@@ -167,9 +184,35 @@ COLLECTION_BLOCKS_CACHE: dict[str, Any] = {"expires_at": 0.0, "payload": None}
 COLLECTION_BLOCKS_CACHE_TTL = 120.0
 
 
-def invalidate_collection_blocks_cache() -> None:
+def invalidate_collection_blocks_cache(
+    *,
+    scryfall_ids: set[str] | None = None,
+    full_rebuild: bool = False,
+    skip_index: bool = False,
+    schedule_sync: bool = True,
+) -> None:
     COLLECTION_BLOCKS_CACHE["expires_at"] = 0.0
     COLLECTION_BLOCKS_CACHE["payload"] = None
+    invalidate_owned_collection_cache()
+    invalidate_collection_history_cache()
+    if skip_index:
+        return
+    try:
+        conn = connect()
+        init_db(conn)
+        from .collection_index import invalidate_collection_owned_index, schedule_collection_index_sync
+
+        invalidate_collection_owned_index(
+            conn,
+            scryfall_ids=scryfall_ids,
+            full_rebuild=full_rebuild,
+        )
+        conn.commit()
+        conn.close()
+        if schedule_sync and not full_rebuild:
+            schedule_collection_index_sync()
+    except Exception:  # noqa: BLE001 - cache invalidation should not break writes.
+        pass
 
 
 def order_plan_items_for_set(
@@ -354,15 +397,16 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
         try:
             path = path.rstrip("/") or "/"
             if method == "GET" and path == "/api/health":
-                self.json_response(
-                    {
-                        "status": "ok",
-                        "api_version": 3,
-                        "app_version": app_version_label(),
-                        **version_identity(),
-                        "features": ["market", "startup"],
-                    }
-                )
+                self.health()
+                return
+            if method == "GET" and path == "/api/db/audit":
+                self.db_audit()
+                return
+            if method == "GET" and path == "/api/db/backup-status":
+                self.db_backup_status()
+                return
+            if method == "POST" and path == "/api/db/backup-run":
+                self.db_backup_run()
                 return
             if method == "GET" and path == "/api/search":
                 self.search_cards(query)
@@ -375,6 +419,95 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
                 return
             if method == "GET" and path == "/api/my-collection/history":
                 self.collection_owned_history(query)
+                return
+            if method == "GET" and path == "/api/my-collection/index-status":
+                from .collection_index import index_rebuild_status
+
+                self.json_response(index_rebuild_status())
+                return
+            if method == "GET" and path == "/api/my-collection/portfolio":
+                self.collection_portfolio()
+                return
+            if method == "GET" and path == "/api/my-collection/issues":
+                self.collection_issues()
+                return
+            if method == "GET" and path == "/api/my-collection/export":
+                self.collection_export()
+                return
+            if method == "POST" and path == "/api/my-collection/import":
+                self.collection_import()
+                return
+            if method == "GET" and path == "/api/wishlist":
+                self.wishlist_list()
+                return
+            if method == "POST" and path == "/api/wishlist":
+                self.wishlist_upsert()
+                return
+            if method == "DELETE" and path.startswith("/api/wishlist/"):
+                item_id = int(path.rsplit("/", 1)[-1])
+                self.wishlist_delete(item_id)
+                return
+            if method == "GET" and path == "/api/price-alerts":
+                self.price_alerts_list()
+                return
+            if method == "POST" and path == "/api/price-alerts":
+                self.price_alert_create()
+                return
+            if method == "DELETE" and path.startswith("/api/price-alerts/"):
+                alert_id = int(path.rsplit("/", 1)[-1])
+                self.price_alert_delete(alert_id)
+                return
+            if method == "GET" and path == "/api/cardmarket/archive-status":
+                self.cardmarket_archive_status()
+                return
+            if method == "GET" and path.startswith("/api/collection/missing/"):
+                set_code = path.rsplit("/", 1)[-1]
+                self.collection_missing(set_code, query)
+                return
+            if method == "GET" and path.startswith("/api/oracle/"):
+                oracle_id = path.removeprefix("/api/oracle/").strip("/")
+                self.oracle_collection(oracle_id)
+                return
+            if method == "GET" and path == "/api/binder":
+                self.binder_list(query)
+                return
+            if method == "POST" and path == "/api/binder":
+                self.binder_upsert()
+                return
+            if method == "DELETE" and path.startswith("/api/binder/"):
+                slot_id = int(path.rsplit("/", 1)[-1])
+                self.binder_delete(slot_id)
+                return
+            if method == "POST" and path == "/api/trade/export":
+                self.trade_export()
+                return
+            if method == "POST" and path == "/api/trade/summary":
+                self.trade_summary()
+                return
+            if method == "POST" and path == "/api/trade/import-match":
+                self.trade_import_match()
+                return
+            if method == "GET" and path == "/api/price-alerts/history":
+                self.price_alerts_history()
+                return
+            if method == "POST" and path.startswith("/api/price-alerts/") and path.endswith("/reactivate"):
+                alert_id = int(path.removeprefix("/api/price-alerts/").removesuffix("/reactivate"))
+                self.price_alert_reactivate(alert_id)
+                return
+            if method == "POST" and path == "/api/wishlist/alert":
+                self.wishlist_create_alert()
+                return
+            if method == "GET" and path == "/api/binder/names":
+                self.binder_names()
+                return
+            if method == "POST" and path == "/api/my-collection/merge-duplicate":
+                self.merge_collection_duplicate()
+                return
+            if method == "GET" and path == "/api/backup/export":
+                self.export_backup()
+                return
+            if method == "POST" and path == "/api/price-alerts/check":
+                self.price_alerts_check()
                 return
             if method == "GET" and path == "/api/market/movers":
                 self.market_movers(query)
@@ -510,7 +643,10 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
         except CacheError as error:
             self.json_response({"error": str(error)}, status=HTTPStatus.BAD_GATEWAY)
         except Exception as error:  # noqa: BLE001 - server should return JSON errors.
-            self.json_response({"error": str(error)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            try:
+                self.json_response({"error": str(error)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            except (ConnectionAbortedError, BrokenPipeError):
+                return
 
     def search_cards(self, query: dict[str, list[str]]) -> None:
         search = one(query, "q", "").strip()
@@ -540,8 +676,59 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
         with open_db() as conn:
             self.json_response(list_collection(conn))
 
+    def health(self) -> None:
+        from .db_audit import collect_db_audit
+        from .weekly_backup import weekly_backup_status
+
+        audit = collect_db_audit()
+        backup_status = weekly_backup_status()
+        self.json_response(
+            {
+                "status": "ok",
+                "api_version": 3,
+                "app_version": app_version_label(),
+                **version_identity(),
+                "features": ["market", "startup", "db_audit"],
+                "db": {
+                    "overall_status": audit["overall_status"],
+                    "main_db_gb": audit["db_files"].get("main", {}).get("size_gb"),
+                    "backup_gb": audit["backup"].get("size_gb"),
+                    "backup_due": backup_status.get("due"),
+                    "warnings": audit.get("warnings") or [],
+                },
+            }
+        )
+
+    def db_audit(self) -> None:
+        from .db_audit import collect_db_audit
+
+        self.json_response(collect_db_audit())
+
+    def db_backup_status(self) -> None:
+        from .weekly_backup import weekly_backup_status
+
+        self.json_response(weekly_backup_status())
+
+    def db_backup_run(self) -> None:
+        payload = self.read_json(default={})
+        force = bool(payload.get("force"))
+        started = start_weekly_backup_job(force=force)
+        self.json_response({"started": started, "status": weekly_backup_status_payload()})
+
     def collection_summary(self) -> None:
         with open_db() as conn:
+            from .collection_index import collection_index_is_ready, get_cached_collection_summary
+
+            cached = get_cached_collection_summary(conn, "fr") if collection_index_is_ready(conn, "fr") else None
+            if cached:
+                payload = db_collection_summary(conn)
+                summary = payload.get("summary") or {}
+                summary["unique_cards"] = cached["unique_lines"]
+                summary["total_cards"] = cached["total_cards"]
+                summary["estimated_value_eur"] = cached["total_value_eur"]
+                summary["from_index_cache"] = True
+                self.json_response({"summary": summary})
+                return
             self.json_response(db_collection_summary(conn))
 
     def collection_blocks(self) -> None:
@@ -587,8 +774,29 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
         only_missing = bool(body.get("only_missing"))
         playset = bool(body.get("playset"))
         display_lang = str(body.get("display_lang") or "merge").strip().lower()
+        shipping_profile = str(body.get("shipping_profile") or "letter").strip().lower()
+        use_wishlist = bool(body.get("from_wishlist"))
         with open_db() as conn:
-            if deck_lines:
+            if use_wishlist:
+                from .collection_extras import list_wishlist
+
+                wishlist_items = list_wishlist(conn)
+                deck_lines = [
+                    {
+                        "scryfall_id": item["scryfall_id"],
+                        "finish": item.get("finish") or finish,
+                        "quantity": item.get("quantity") or 1,
+                    }
+                    for item in wishlist_items
+                    if item.get("scryfall_id")
+                ]
+                items = order_plan_items_from_lines(
+                    conn,
+                    deck_lines,
+                    default_finish=finish,
+                    only_missing=only_missing,
+                )
+            elif deck_lines:
                 items = order_plan_items_from_lines(
                     conn,
                     deck_lines,
@@ -602,7 +810,7 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
             elif set_code:
                 items = order_plan_items_for_set(conn, set_code, finish=finish, only_missing=only_missing)
             else:
-                raise ValueError("Precisez set_code, section_code ou scryfall_ids.")
+                raise ValueError("Precisez set_code, section_code, scryfall_ids, lines ou from_wishlist.")
             self.json_response(
                 build_cardmarket_order_plan(
                     conn,
@@ -610,21 +818,373 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
                     finish=finish,
                     playset=playset,
                     display_lang=display_lang,
+                    shipping_profile=shipping_profile,
                 )
             )
 
     def collection_owned(self, query: dict[str, list[str]]) -> None:
+        from .collection_index import index_rebuild_status, parse_my_collection_filters
+
         sort = one(query, "sort", "name_asc")
         display_lang = parse_display_lang(query)
+        page_size, offset = parse_my_collection_page(query)
+        filters = parse_my_collection_filters(query)
         with open_db() as conn:
-            self.json_response(list_owned_collection_cards(conn, sort=sort, display_lang=display_lang))
+            self.json_response(
+                {
+                    **list_owned_collection_cards(
+                        conn,
+                        sort=sort,
+                        display_lang=display_lang,
+                        limit=page_size,
+                        offset=offset,
+                        filters=filters,
+                    ),
+                    "index_status": index_rebuild_status(),
+                }
+            )
 
     def collection_owned_history(self, query: dict[str, list[str]]) -> None:
         source_key = one(query, "source", "cardmarket")
         range_key = parse_history_range(query)
         options = parse_history_options(query)
+        if options.history_mode == "archive" and one(query, "confirm_archive", "0") not in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            with open_db() as conn:
+                from .collection_extras import cardmarket_archive_status
+
+                archive_meta = cardmarket_archive_status(conn)
+                if archive_meta["archive_days"] < 7:
+                    self.json_response(
+                        {
+                            "requires_confirmation": True,
+                            "history_mode": "archive",
+                            "archive_meta": archive_meta,
+                            "message": (
+                                "L'archive CM est courte : le calcul complet peut prendre plusieurs minutes. "
+                                "Confirmez avec confirm_archive=1 ou utilisez history_mode=fast."
+                            ),
+                        }
+                    )
+                    return
+        cached = get_cached_collection_history(source_key, options, range_key)
+        if cached is not None:
+            self.json_response(cached)
+            return
         with open_db() as conn:
-            self.json_response(collection_valuation_history(conn, source_key, options, range_key=range_key))
+            payload = collection_valuation_history(conn, source_key, options, range_key=range_key)
+            cache_collection_history(source_key, options, range_key, payload)
+            self.json_response(payload)
+
+    def collection_portfolio(self) -> None:
+        from .collection_extras import portfolio_stats
+
+        with open_db() as conn:
+            self.json_response(portfolio_stats(conn))
+
+    def collection_issues(self) -> None:
+        from .collection_extras import collection_issues as detect_collection_issues
+
+        with open_db() as conn:
+            self.json_response(detect_collection_issues(conn))
+
+    def collection_export(self) -> None:
+        from .collection_extras import export_collection_csv
+
+        with open_db() as conn:
+            csv_text = export_collection_csv(conn)
+        data = csv_text.encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header("Content-Disposition", 'attachment; filename="ma-collection.csv"')
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        try:
+            self.wfile.write(data)
+        except (ConnectionAbortedError, BrokenPipeError):
+            return
+
+    def collection_import(self) -> None:
+        from .collection_extras import import_collection_csv
+
+        payload = self.read_json()
+        raw_text = str(payload.get("csv") or "")
+        if not raw_text.strip():
+            raise ValueError("Le champ csv est requis.")
+        with open_db() as conn:
+            result = import_collection_csv(conn, raw_text)
+        invalidate_collection_blocks_cache(full_rebuild=True)
+        self.json_response(result)
+
+    def wishlist_list(self) -> None:
+        from .collection_extras import list_wishlist
+
+        with open_db() as conn:
+            self.json_response({"items": list_wishlist(conn)})
+
+    def wishlist_upsert(self) -> None:
+        from .collection_extras import upsert_wishlist_item
+
+        payload = self.read_json()
+        scryfall_id = str(payload.get("scryfall_id") or "").strip()
+        if not scryfall_id:
+            raise ValueError("scryfall_id est requis.")
+        with open_db() as conn:
+            item = upsert_wishlist_item(
+                conn,
+                scryfall_id=scryfall_id,
+                finish=str(payload.get("finish") or "nonfoil"),
+                quantity=int(payload.get("quantity") or 1),
+                priority=int(payload.get("priority") or 0),
+                max_price_eur=payload.get("max_price_eur"),
+                notes=payload.get("notes"),
+                auto_alert=bool(payload.get("auto_alert")),
+            )
+        self.json_response(item)
+
+    def wishlist_delete(self, item_id: int) -> None:
+        from .collection_extras import delete_wishlist_item
+
+        with open_db() as conn:
+            delete_wishlist_item(conn, item_id)
+        self.json_response({"deleted": item_id})
+
+    def price_alerts_list(self) -> None:
+        from .collection_extras import list_price_alerts
+
+        with open_db() as conn:
+            self.json_response({"alerts": list_price_alerts(conn)})
+
+    def price_alert_create(self) -> None:
+        from .collection_extras import create_price_alert
+
+        payload = self.read_json()
+        scryfall_id = str(payload.get("scryfall_id") or "").strip()
+        if not scryfall_id:
+            raise ValueError("scryfall_id est requis.")
+        with open_db() as conn:
+            alert = create_price_alert(
+                conn,
+                scryfall_id=scryfall_id,
+                finish=str(payload.get("finish") or "nonfoil"),
+                direction=str(payload.get("direction") or "below"),
+                threshold_eur=float(payload.get("threshold_eur") or 0),
+                source=str(payload.get("source") or "cardmarket"),
+            )
+        self.json_response(alert)
+
+    def price_alert_delete(self, alert_id: int) -> None:
+        from .collection_extras import delete_price_alert
+
+        with open_db() as conn:
+            delete_price_alert(conn, alert_id)
+        self.json_response({"deleted": alert_id})
+
+    def price_alerts_history(self) -> None:
+        from .collection_extras import list_price_alert_events
+
+        with open_db() as conn:
+            self.json_response({"events": list_price_alert_events(conn)})
+
+    def price_alert_reactivate(self, alert_id: int) -> None:
+        from .collection_extras import reactivate_price_alert
+
+        with open_db() as conn:
+            ok = reactivate_price_alert(conn, alert_id)
+        if not ok:
+            self.json_response({"error": "Alerte introuvable"}, status=HTTPStatus.NOT_FOUND)
+            return
+        self.json_response({"reactivated": alert_id})
+
+    def wishlist_create_alert(self) -> None:
+        from .collection_extras import create_wishlist_price_alert
+
+        payload = self.read_json()
+        scryfall_id = str(payload.get("scryfall_id") or "").strip()
+        finish = str(payload.get("finish") or "nonfoil")
+        if not scryfall_id:
+            raise ValueError("scryfall_id est requis.")
+        with open_db() as conn:
+            alert = create_wishlist_price_alert(conn, scryfall_id=scryfall_id, finish=finish)
+        if alert is None:
+            raise ValueError("Pas de max_price sur cette ligne wishlist.")
+        self.json_response(alert)
+
+    def binder_names(self) -> None:
+        from .collection_extras import list_binder_names
+
+        with open_db() as conn:
+            self.json_response({"names": list_binder_names(conn)})
+
+    def merge_collection_duplicate(self) -> None:
+        from .collection_extras import merge_duplicate_collection_rows
+        from .collection_index import schedule_collection_index_sync
+
+        payload = self.read_json()
+        scryfall_id = str(payload.get("scryfall_id") or "").strip()
+        finish = str(payload.get("finish") or "nonfoil")
+        if not scryfall_id:
+            raise ValueError("scryfall_id est requis.")
+        with open_db() as conn:
+            result = merge_duplicate_collection_rows(conn, scryfall_id, finish)
+        invalidate_collection_blocks_cache(scryfall_ids={scryfall_id})
+        schedule_collection_index_sync()
+        self.json_response(result)
+
+    def export_backup(self) -> None:
+        from .collection_extras import export_app_backup
+
+        with open_db() as conn:
+            self.json_response(export_app_backup(conn))
+
+    def cardmarket_archive_status(self) -> None:
+        from .collection_extras import cardmarket_archive_status as archive_status
+
+        with open_db() as conn:
+            self.json_response(archive_status(conn))
+
+    def collection_missing(self, set_code: str, query: dict[str, list[str]]) -> None:
+        from .collection_extras import missing_cards_for_set
+
+        display_lang = parse_display_lang(query)
+        with open_db() as conn:
+            self.json_response(missing_cards_for_set(conn, set_code, display_lang=display_lang))
+
+    def oracle_collection(self, oracle_id: str) -> None:
+        from .collection_extras import oracle_collection_view
+
+        with open_db() as conn:
+            self.json_response(oracle_collection_view(conn, oracle_id))
+
+    def binder_list(self, query: dict[str, list[str]]) -> None:
+        from .collection_extras import list_binder_slots
+
+        binder_name = one(query, "binder", "Principal")
+        with open_db() as conn:
+            self.json_response({"slots": list_binder_slots(conn, binder_name=binder_name)})
+
+    def binder_upsert(self) -> None:
+        from .collection_extras import upsert_binder_slot
+
+        payload = self.read_json()
+        scryfall_id = str(payload.get("scryfall_id") or "").strip()
+        if not scryfall_id:
+            raise ValueError("scryfall_id est requis.")
+        with open_db() as conn:
+            slot = upsert_binder_slot(
+                conn,
+                scryfall_id=scryfall_id,
+                finish=str(payload.get("finish") or "nonfoil"),
+                binder_name=str(payload.get("binder_name") or "Principal"),
+                page_number=int(payload.get("page_number") or 1),
+                slot_number=int(payload.get("slot_number") or 1),
+                condition=str(payload.get("condition") or "near_mint"),
+                quantity=int(payload.get("quantity") or 1),
+                notes=payload.get("notes"),
+                slot_id=payload.get("id"),
+            )
+        self.json_response(slot)
+
+    def binder_delete(self, slot_id: int) -> None:
+        from .collection_extras import delete_binder_slot
+
+        with open_db() as conn:
+            delete_binder_slot(conn, slot_id)
+        self.json_response({"deleted": slot_id})
+
+    def trade_export(self) -> None:
+        from .collection_extras import (
+            enrich_trade_lines_with_prices,
+            export_trade_csv,
+            export_trade_hw_text,
+            export_trade_mcm_decklist,
+        )
+
+        payload = self.read_json()
+        format_key = str(payload.get("format") or "csv").strip().lower()
+        have_lines = payload.get("have_lines") or []
+        want_lines = payload.get("want_lines") or []
+        lines = payload.get("lines") or []
+        if not have_lines and not want_lines and not lines:
+            raise ValueError("have_lines, want_lines ou lines est requis.")
+        with open_db() as conn:
+            if have_lines or want_lines:
+                have_lines = enrich_trade_lines_with_prices(conn, have_lines)
+                want_lines = enrich_trade_lines_with_prices(conn, want_lines)
+            else:
+                lines = enrich_trade_lines_with_prices(conn, lines)
+
+        if format_key == "hw":
+            text = export_trade_hw_text(have_lines or lines, want_lines)
+            filename = "trade-hw.txt"
+            content_type = "text/plain; charset=utf-8"
+        elif format_key == "mcm":
+            text = export_trade_mcm_decklist(want_lines or have_lines or lines)
+            filename = "trade-mcm.txt"
+            content_type = "text/plain; charset=utf-8"
+        else:
+            text = export_trade_csv(have_lines or lines)
+            filename = "trade-list.csv"
+            content_type = "text/csv; charset=utf-8"
+
+        data = text.encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        try:
+            self.wfile.write(data)
+        except (ConnectionAbortedError, BrokenPipeError):
+            return
+
+    def trade_summary(self) -> None:
+        from .collection_extras import enrich_trade_lines_with_prices, trade_lines_total_eur
+
+        payload = self.read_json(default={})
+        have_lines = payload.get("have_lines") or []
+        want_lines = payload.get("want_lines") or []
+        with open_db() as conn:
+            have_lines = enrich_trade_lines_with_prices(conn, have_lines)
+            want_lines = enrich_trade_lines_with_prices(conn, want_lines)
+        have_total = trade_lines_total_eur(have_lines)
+        want_total = trade_lines_total_eur(want_lines)
+        delta = round(have_total - want_total, 2)
+        equity_pct = None
+        if want_total > 0:
+            equity_pct = round((delta / want_total) * 100, 1)
+        self.json_response(
+            {
+                "have_total_eur": have_total,
+                "want_total_eur": want_total,
+                "delta_eur": delta,
+                "equity_pct": equity_pct,
+                "currency": "EUR",
+                "note": "Valeurs indicatives (trend Cardmarket / prix affiches).",
+            }
+        )
+
+    def trade_import_match(self) -> None:
+        from .collection_extras import match_trade_import
+
+        payload = self.read_json(default={})
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            raise ValueError("text est requis.")
+        with open_db() as conn:
+            result = match_trade_import(conn, text)
+        self.json_response(result)
+
+    def price_alerts_check(self) -> None:
+        from .collection_extras import check_price_alerts
+
+        with open_db() as conn:
+            triggered = check_price_alerts(conn)
+        self.json_response({"triggered": triggered})
 
     def market_movers(self, query: dict[str, list[str]]) -> None:
         source_key = one(query, "source", "cardmarket")
@@ -654,7 +1214,7 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
             card = refresh_card_from_scryfall(conn, client, scryfall_id)
             result = adjust_collection_quantity(conn, scryfall_id=scryfall_id, finish=finish, delta=delta)
             summary = db_collection_summary(conn)
-        invalidate_collection_blocks_cache()
+        invalidate_collection_blocks_cache(scryfall_ids={scryfall_id})
         self.json_response({**summary, "adjust": result})
 
     def refresh_collection_prices(self) -> None:
@@ -752,7 +1312,7 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
             for code in {section_code or set_code, set_code}:
                 if code:
                     refresh_set_stats_cache(code)
-            invalidate_collection_blocks_cache()
+            invalidate_collection_blocks_cache(scryfall_ids=set(scryfall_ids))
 
         self.json_response(
             {
@@ -839,6 +1399,9 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
                 if card["scryfall_id"] in cards_by_id
             ]
             deck_owned = deck_owned_status(conn, file_name, deck)
+            from .collection_extras import deck_cards_to_buy
+
+            to_buy = deck_cards_to_buy(conn, deck_cards)
 
         self.json_response(
             {
@@ -847,6 +1410,7 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
                 "cards_by_section": grouped_cards,
                 "valuation": valuation,
                 "mtgjson": mtgjson_status,
+                "to_buy": to_buy,
             }
         )
 
@@ -919,6 +1483,8 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
                 "imported_cards": imported,
                 "missing_cards": missing,
             }
+        touched = {card["scryfall_id"] for card in deck_cards}
+        invalidate_collection_blocks_cache(scryfall_ids=touched)
         self.json_response(response, status=HTTPStatus.CREATED)
 
     def remove_deck_from_collection(self) -> None:
@@ -933,6 +1499,7 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
             raise ValueError("Aucune carte importable trouvee dans ce deck.")
 
         removed = 0
+        touched_ids: set[str] = set()
         with open_db() as conn:
             for deck_card in deck_cards:
                 row = conn.execute(
@@ -954,6 +1521,7 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
                     finish=deck_card["finish"],
                     delta=-take,
                 )
+                touched_ids.add(deck_card["scryfall_id"])
                 removed += take
 
             db_set_deck_owned(conn, file_name, False)
@@ -963,7 +1531,7 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
                 "deck": {**deck_summary(deck, file_name), **deck_status},
                 "removed_cards": removed,
             }
-        invalidate_collection_blocks_cache()
+        invalidate_collection_blocks_cache(scryfall_ids=touched_ids or None, full_rebuild=not touched_ids)
         self.json_response(response)
 
     def set_deck_owned(self) -> None:
@@ -1053,7 +1621,7 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
             )
             response = list_collection(conn)
             response["created_item_id"] = item_id
-        invalidate_collection_blocks_cache()
+        invalidate_collection_blocks_cache(scryfall_ids={scryfall_id})
         self.json_response(response, status=HTTPStatus.CREATED)
 
     def update_collection(self, item_id: int) -> None:
@@ -1068,21 +1636,35 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
             payload["purchase_price"] = optional_float(payload["purchase_price"])
 
         with open_db() as conn:
+            row = conn.execute(
+                "SELECT scryfall_id FROM collection_items WHERE id = ?",
+                (item_id,),
+            ).fetchone()
             updated = update_collection_item(conn, item_id, payload)
             if not updated:
                 self.json_response({"error": "Collection item not found"}, status=HTTPStatus.NOT_FOUND)
                 return
             self.json_response(list_collection(conn))
-        invalidate_collection_blocks_cache()
+        if row:
+            invalidate_collection_blocks_cache(scryfall_ids={row["scryfall_id"]})
+        else:
+            invalidate_collection_blocks_cache(full_rebuild=True)
 
     def delete_from_collection(self, item_id: int) -> None:
         with open_db() as conn:
+            row = conn.execute(
+                "SELECT scryfall_id FROM collection_items WHERE id = ?",
+                (item_id,),
+            ).fetchone()
             deleted = delete_collection_item(conn, item_id)
             if not deleted:
                 self.json_response({"error": "Collection item not found"}, status=HTTPStatus.NOT_FOUND)
                 return
             self.json_response(list_collection(conn))
-        invalidate_collection_blocks_cache()
+        if row:
+            invalidate_collection_blocks_cache(scryfall_ids={row["scryfall_id"]})
+        else:
+            invalidate_collection_blocks_cache(full_rebuild=True)
 
     def refresh_snapshots(self) -> None:
         payload = self.read_json(default={})
@@ -1189,14 +1771,21 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
             finish_variants = finish_variant_summaries(conn, client, card)
             catalog_blocks = catalog_locations_for_set(display_card.get("set") or "")
             oracle_owned = oracle_collection_summary(conn, display_card.get("oracle_id"))
-            cm_guide = cardmarket_latest_guide_for_card(conn, display_card["id"], effective_finish)
-            cm_series = cardmarket_guide_multi_series(conn, display_card["id"], effective_finish)
+            cm_scryfall_id = resolve_cardmarket_scryfall_id(conn, display_card)
+            cm_guide = cardmarket_latest_guide_for_card(conn, cm_scryfall_id, effective_finish)
+            cm_series = cardmarket_guide_multi_series(conn, cm_scryfall_id, effective_finish)
+            cm_insights = cardmarket_product_insights(conn, display_card)
+            if cm_insights:
+                cm_insights = {
+                    **cm_insights,
+                    "product_url": cardmarket_product_url(int(cm_insights["id_product"])),
+                }
             cm_payload = None
             live_point = current_eur_price(display_card, effective_finish)
             if cm_guide:
                 foil_url = None
                 if effective_finish != "foil":
-                    foil_guide = cardmarket_latest_guide_for_card(conn, display_card["id"], "foil")
+                    foil_guide = cardmarket_latest_guide_for_card(conn, cm_scryfall_id, "foil")
                     if foil_guide and foil_guide.get("id_product"):
                         foil_url = cardmarket_product_url(foil_guide["id_product"], foil=True)
                 live_delta_pct = None
@@ -1230,6 +1819,7 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
                     "finish_variants": finish_variants,
                     "markets": market_summaries(mtgjson_points, effective_finish),
                     "cardmarket_guide": cm_payload,
+                    "cardmarket_insights": cm_insights,
                     "mtgjson": mtgjson_status,
                     "other_printings": other_printings,
                     "catalog_blocks": catalog_blocks,
@@ -1259,7 +1849,10 @@ class MvpRequestHandler(BaseHTTPRequestHandler):
         for key, value in (extra_headers or {}).items():
             self.send_header(key, value)
         self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.wfile.write(data)
+        except (ConnectionAbortedError, BrokenPipeError):
+            return
 
     def serve_cached_image(self, path: str) -> None:
         file_name = Path(path).name
@@ -1583,6 +2176,8 @@ class HistoryBuildOptions:
     exclude_illiquid: bool = False
     speculative_preset: str | None = None
     market_price_metric: str = "trend"
+    history_mode: str = "auto"
+    market_scope: str = "all"
 
 
 MOVER_SPECIAL_RARITIES = frozenset({"mythic", "special", "bonus"})
@@ -1627,7 +2222,82 @@ DEFAULT_MARKET_WARMUP_RANGES = ("7d", "1m")
 MARKET_MOVERS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 MARKET_MOVERS_CACHE_LOCK = threading.Lock()
 MARKET_MOVERS_CACHE_TTL = 6 * 3600.0
+MARKET_MOVERS_META_PREFIX = "market_movers_cache:"
+MARKET_SPECULATIVE_EVAL_LIMIT = 1500
 MARKET_WARMUP_RANGE_PAUSE_SECONDS = 1.0
+COLLECTION_HISTORY_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+COLLECTION_HISTORY_CACHE_LOCK = threading.Lock()
+COLLECTION_HISTORY_CACHE_TTL = 6 * 3600.0
+COLLECTION_HISTORY_CACHE_MAX_ENTRIES = 8
+
+
+def parse_my_collection_page(query: dict[str, list[str]]) -> tuple[int, int]:
+    raw_size = one(query, "page_size", "100").strip()
+    try:
+        page_size = int(raw_size)
+    except ValueError:
+        page_size = 100
+    if page_size not in MY_COLLECTION_PAGE_SIZES:
+        page_size = 100
+    raw_offset = one(query, "offset", "0").strip()
+    try:
+        offset = max(0, int(raw_offset))
+    except ValueError:
+        offset = 0
+    return page_size, offset
+
+
+def collection_history_cache_key(
+    source_key: str,
+    options: HistoryBuildOptions,
+    range_key: str,
+) -> str:
+    payload = {
+        "source_key": source_key,
+        "range": range_key,
+        "options": history_options_json(options),
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def get_cached_collection_history(
+    source_key: str,
+    options: HistoryBuildOptions,
+    range_key: str,
+) -> dict[str, Any] | None:
+    key = collection_history_cache_key(source_key, options, range_key)
+    now = time.time()
+    with COLLECTION_HISTORY_CACHE_LOCK:
+        entry = COLLECTION_HISTORY_CACHE.get(key)
+        if entry is None:
+            return None
+        cached_at, payload = entry
+        if now - cached_at > COLLECTION_HISTORY_CACHE_TTL:
+            COLLECTION_HISTORY_CACHE.pop(key, None)
+            return None
+        return payload
+
+
+def cache_collection_history(
+    source_key: str,
+    options: HistoryBuildOptions,
+    range_key: str,
+    payload: dict[str, Any],
+) -> None:
+    key = collection_history_cache_key(source_key, options, range_key)
+    with COLLECTION_HISTORY_CACHE_LOCK:
+        if key not in COLLECTION_HISTORY_CACHE and len(COLLECTION_HISTORY_CACHE) >= COLLECTION_HISTORY_CACHE_MAX_ENTRIES:
+            oldest_key = min(
+                COLLECTION_HISTORY_CACHE,
+                key=lambda cache_key: COLLECTION_HISTORY_CACHE[cache_key][0],
+            )
+            COLLECTION_HISTORY_CACHE.pop(oldest_key, None)
+        COLLECTION_HISTORY_CACHE[key] = (time.time(), payload)
+
+
+def invalidate_collection_history_cache() -> None:
+    with COLLECTION_HISTORY_CACHE_LOCK:
+        COLLECTION_HISTORY_CACHE.clear()
 
 
 def parse_history_range(query: dict[str, list[str]]) -> str:
@@ -1654,6 +2324,12 @@ def parse_history_options(query: dict[str, list[str]]) -> HistoryBuildOptions:
     market_price_metric = one(query, "market_metric", "trend").strip().lower()
     if market_price_metric not in {"trend", "avg7"}:
         market_price_metric = "trend"
+    history_mode = one(query, "history_mode", "auto").strip().lower()
+    if history_mode not in {"auto", "fast", "archive"}:
+        history_mode = "auto"
+    market_scope = one(query, "scope", "all").strip().lower()
+    if market_scope not in {"all", "owned", "wishlist"}:
+        market_scope = "all"
     return HistoryBuildOptions(
         only_priced=only_priced,
         exclude_added_after=exclude_added_after,
@@ -1667,6 +2343,8 @@ def parse_history_options(query: dict[str, list[str]]) -> HistoryBuildOptions:
         exclude_illiquid=exclude_illiquid,
         speculative_preset=speculative_preset,
         market_price_metric=market_price_metric,
+        history_mode=history_mode,
+        market_scope=market_scope,
     )
 
 
@@ -1876,6 +2554,73 @@ def collection_cards_for_history(conn) -> list[dict[str, Any]]:
     ]
 
 
+def collection_valuation_history_fast(
+    conn,
+    source_key: str,
+    options: HistoryBuildOptions,
+    *,
+    range_key: str,
+    archive_meta: dict[str, Any],
+) -> dict[str, Any]:
+    source_meta = chart_price_source(source_key)
+    currency = source_meta["currency"]
+    source_label = source_meta["label"]
+    all_cards = collection_cards_for_history(conn)
+    collection_cards = filter_cards_by_acquisition(all_cards, options.exclude_added_after)
+    total_lines_row = conn.execute(
+        "SELECT COALESCE(SUM(quantity), 0) AS quantity FROM collection_items WHERE quantity > 0"
+    ).fetchone()
+    total_lines = int(total_lines_row["quantity"])
+    if not collection_cards:
+        return {
+            "current_total": 0.0,
+            "current_total_eur": 0.0,
+            "priced_cards": 0,
+            "missing_cards": 0,
+            "history": [],
+            "history_source": f"{source_label} {currency}",
+            "currency": currency,
+            "source_key": source_key,
+            "options": history_options_json(options),
+            "history_mode": "fast",
+            "archive_meta": archive_meta,
+            "meta": {"total_lines": total_lines, "included_lines": 0, "fast_mode": True},
+            "movers": [],
+        }
+
+    live_total, live_priced, live_missing = live_totals_for_cards(conn, collection_cards, options)
+    today = date.today().isoformat()
+    history = [
+        {
+            "date": today,
+            "snapshot_date": today,
+            "total_eur": float(live_total),
+            "priced_cards": live_priced,
+            "missing_cards": live_missing,
+        }
+    ]
+    return {
+        "current_total": float(live_total),
+        "current_total_eur": float(live_total),
+        "priced_cards": live_priced,
+        "missing_cards": live_missing,
+        "history": history,
+        "history_source": f"{source_label} {currency} (approximatif)",
+        "currency": currency,
+        "source_key": source_key,
+        "options": history_options_json(options),
+        "history_mode": "fast",
+        "archive_meta": archive_meta,
+        "meta": {
+            "total_lines": total_lines,
+            "included_lines": sum(card["quantity"] for card in collection_cards),
+            "fast_mode": True,
+            "range": range_key,
+        },
+        "movers": [],
+    }
+
+
 def collection_valuation_history(
     conn,
     source_key: str = "cardmarket",
@@ -1883,6 +2628,20 @@ def collection_valuation_history(
     range_key: str = "7d",
 ) -> dict[str, Any]:
     options = options or HistoryBuildOptions()
+    from .collection_extras import cardmarket_archive_status
+
+    archive_meta = cardmarket_archive_status(conn)
+    resolved_mode = options.history_mode
+    if resolved_mode == "auto":
+        resolved_mode = "archive" if archive_meta["archive_days"] >= 7 else "fast"
+    if resolved_mode == "fast":
+        return collection_valuation_history_fast(
+            conn,
+            source_key,
+            options,
+            range_key=range_key,
+            archive_meta=archive_meta,
+        )
     source_meta = chart_price_source(source_key)
     currency = source_meta["currency"]
     source_label = source_meta["label"]
@@ -2004,7 +2763,8 @@ def collection_valuation_history(
             "source_key": source_key,
             "options": history_options_json(options),
             "meta": meta,
-            "movers": movers,
+            "history_mode": resolved_mode,
+            "archive_meta": archive_meta,
         }
 
     return {
@@ -2022,6 +2782,62 @@ def collection_valuation_history(
     }
 
 
+def deck_valuation_history_fast(
+    conn,
+    deck_cards: list[dict[str, Any]],
+    source_key: str,
+    options: HistoryBuildOptions,
+    *,
+    archive_meta: dict[str, Any],
+) -> dict[str, Any]:
+    source_meta = chart_price_source(source_key)
+    currency = source_meta["currency"]
+    source_label = source_meta["label"]
+    if not deck_cards:
+        return {
+            "current_total_eur": 0.0,
+            "priced_cards": 0,
+            "missing_cards": 0,
+            "history": [],
+            "history_source": f"{source_label} {currency}",
+            "currency": currency,
+            "source_key": source_key,
+            "options": history_options_json(options),
+            "history_mode": "fast",
+            "archive_meta": archive_meta,
+            "meta": {"total_lines": 0, "included_lines": 0, "fast_mode": True},
+        }
+
+    live_total, live_priced, live_missing = live_totals_for_cards(conn, deck_cards, options)
+    today = date.today().isoformat()
+    history = [
+        {
+            "date": today,
+            "snapshot_date": today,
+            "total_eur": float(live_total),
+            "priced_cards": live_priced,
+            "missing_cards": live_missing,
+        }
+    ]
+    return {
+        "current_total_eur": float(live_total),
+        "priced_cards": live_priced,
+        "missing_cards": live_missing,
+        "history": history,
+        "history_source": f"{source_label} {currency} (approximatif)",
+        "currency": currency,
+        "source_key": source_key,
+        "options": history_options_json(options),
+        "history_mode": "fast",
+        "archive_meta": archive_meta,
+        "meta": {
+            "total_lines": sum(card["quantity"] for card in deck_cards),
+            "included_lines": sum(card["quantity"] for card in deck_cards),
+            "fast_mode": True,
+        },
+    }
+
+
 def deck_valuation_history(
     conn,
     deck_cards: list[dict[str, Any]],
@@ -2029,6 +2845,15 @@ def deck_valuation_history(
     options: HistoryBuildOptions | None = None,
 ) -> dict[str, Any]:
     options = options or HistoryBuildOptions()
+    from .collection_extras import cardmarket_archive_status
+
+    archive_meta = cardmarket_archive_status(conn)
+    resolved_mode = options.history_mode
+    if resolved_mode == "auto":
+        resolved_mode = "archive" if archive_meta["archive_days"] >= 7 else "fast"
+    if resolved_mode == "fast":
+        return deck_valuation_history_fast(conn, deck_cards, source_key, options, archive_meta=archive_meta)
+
     source_meta = chart_price_source(source_key)
     currency = source_meta["currency"]
     source_label = source_meta["label"]
@@ -2085,7 +2910,8 @@ def deck_valuation_history(
             "source_key": source_key,
             "options": history_options_json(options),
             "meta": meta,
-            "movers": movers,
+            "history_mode": resolved_mode,
+            "archive_meta": archive_meta,
         }
     return {
         "current_total_eur": 0.0,
@@ -2097,6 +2923,8 @@ def deck_valuation_history(
         "source_key": source_key,
         "options": history_options_json(options),
         "meta": meta,
+        "history_mode": resolved_mode,
+        "archive_meta": archive_meta,
     }
 
 
@@ -2114,6 +2942,8 @@ def history_options_json(options: HistoryBuildOptions) -> dict[str, Any]:
         "exclude_illiquid": options.exclude_illiquid,
         "speculative_preset": options.speculative_preset,
         "market_metric": options.market_price_metric,
+        "history_mode": options.history_mode,
+        "scope": options.market_scope,
     }
 
 
@@ -2147,6 +2977,55 @@ def market_movers_cache_key(source_key: str, options: HistoryBuildOptions, range
         "options": history_options_json(options),
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _market_movers_meta_key(source_key: str, options: HistoryBuildOptions, range_key: str) -> str:
+    digest = market_movers_cache_key(source_key, options, range_key)
+    return f"{MARKET_MOVERS_META_PREFIX}{digest}"
+
+
+def load_persisted_market_movers(
+    conn,
+    source_key: str,
+    options: HistoryBuildOptions,
+    range_key: str,
+) -> dict[str, Any] | None:
+    from .database import get_app_metadata
+
+    raw = get_app_metadata(conn, _market_movers_meta_key(source_key, options, range_key))
+    if not raw:
+        return None
+    try:
+        envelope = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    guide_table = catalog_table("cardmarket_price_guide_daily")
+    guide_max = conn.execute(f"SELECT MAX(snapshot_date) FROM {guide_table}").fetchone()
+    guide_date = str(guide_max[0]) if guide_max and guide_max[0] else None
+    if envelope.get("guide_max_date") != guide_date:
+        return None
+    payload = envelope.get("payload")
+    return payload if isinstance(payload, dict) else None
+
+
+def persist_market_movers(
+    conn,
+    source_key: str,
+    options: HistoryBuildOptions,
+    range_key: str,
+    payload: dict[str, Any],
+) -> None:
+    from .database import set_app_metadata
+
+    guide_table = catalog_table("cardmarket_price_guide_daily")
+    guide_max = conn.execute(f"SELECT MAX(snapshot_date) FROM {guide_table}").fetchone()
+    guide_date = str(guide_max[0]) if guide_max and guide_max[0] else None
+    envelope = {
+        "guide_max_date": guide_date,
+        "cached_at": utc_now(),
+        "payload": payload,
+    }
+    set_app_metadata(conn, _market_movers_meta_key(source_key, options, range_key), json.dumps(envelope))
 
 
 def get_cached_market_movers(
@@ -2327,16 +3206,67 @@ def _batch_snapshot_pre_period_stats(
         cutoff_date = (date.fromisoformat(before_date) - timedelta(days=lookback_days)).isoformat()
     except ValueError:
         return {}
+    from .price_daily import column_for_chart_source, pre_period_stats_from_daily, reads_price_daily
+
     source_meta = chart_price_source(source_key)
     currency = source_meta["currency"]
     sources = chart_price_sources_for_key(source_key)
-    snapshots = catalog_table("price_snapshots")
     stats: dict[str, dict[str, float]] = {}
+    remaining_ids = list(scryfall_ids)
+    if reads_price_daily(conn):
+        primary_source = source_meta["source"]
+        if primary_source == "cardmarket-guide":
+            primary_source = "scryfall-cardmarket"
+        column = column_for_chart_source(primary_source, finish)
+        if column:
+            stats = pre_period_stats_from_daily(
+                conn,
+                scryfall_ids,
+                column=column,
+                before_date=before_date,
+                cutoff_date=cutoff_date,
+            )
+            remaining_ids = [scryfall_id for scryfall_id in scryfall_ids if scryfall_id not in stats]
+            if not remaining_ids:
+                return stats
+
+    snapshot_tables: list[str] = []
+    from .database import catalog_object_type
+
+    snapshots = catalog_table("price_snapshots")
+    if catalog_object_type(conn, "price_snapshots") in {"table", "view"}:
+        snapshot_tables.append(snapshots)
+    if conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='price_snapshots_legacy'"
+    ).fetchone():
+        snapshot_tables.append("price_snapshots_legacy")
+    if not snapshot_tables:
+        return stats
+
     chunk_size = 400
     source_placeholders = ",".join("?" for _ in sources)
-    for index in range(0, len(scryfall_ids), chunk_size):
-        chunk = scryfall_ids[index : index + chunk_size]
+    for index in range(0, len(remaining_ids), chunk_size):
+        chunk = remaining_ids[index : index + chunk_size]
         placeholders = ",".join("?" for _ in chunk)
+        union_queries = []
+        for table in snapshot_tables:
+            union_queries.append(
+                f"""
+                SELECT scryfall_id, price
+                FROM {table}
+                WHERE scryfall_id IN ({placeholders})
+                  AND finish = ?
+                  AND currency = ?
+                  AND source IN ({source_placeholders})
+                  AND snapshot_date < ?
+                  AND snapshot_date >= ?
+                  AND price > 0
+                """
+            )
+        union_body = "\nUNION ALL\n".join(union_queries)
+        params: list[Any] = []
+        for _table in snapshot_tables:
+            params.extend([*chunk, finish, currency, *sources, before_date, cutoff_date])
         rows = conn.execute(
             f"""
             SELECT scryfall_id,
@@ -2344,24 +3274,10 @@ def _batch_snapshot_pre_period_stats(
                    MAX(price) AS max_price,
                    AVG(price) AS avg_price,
                    COUNT(*) AS point_count
-            FROM {snapshots}
-            WHERE scryfall_id IN ({placeholders})
-              AND finish = ?
-              AND currency = ?
-              AND source IN ({source_placeholders})
-              AND snapshot_date < ?
-              AND snapshot_date >= ?
-              AND price > 0
+            FROM ({union_body}) AS combined
             GROUP BY scryfall_id
             """,
-            (
-                *chunk,
-                finish,
-                currency,
-                *sources,
-                before_date,
-                cutoff_date,
-            ),
+            tuple(params),
         ).fetchall()
         for row in rows:
             stats[row["scryfall_id"]] = {
@@ -2571,13 +3487,8 @@ def snapshot_period_bounds(
 ) -> tuple[str, str] | None:
     if source_key == "cardmarket":
         guide_bounds = cardmarket_guide_period_bounds(conn, range_key)
-        snapshot_bounds = _snapshot_period_bounds_from_table(conn, source_key, range_key)
-        if guide_bounds and snapshot_bounds:
-            return (
-                min(guide_bounds[0], snapshot_bounds[0]),
-                max(guide_bounds[1], snapshot_bounds[1]),
-            )
-        return guide_bounds or snapshot_bounds
+        if guide_bounds:
+            return guide_bounds
     return _snapshot_period_bounds_from_table(conn, source_key, range_key)
 
 
@@ -2586,9 +3497,25 @@ def _snapshot_period_bounds_from_table(
     source_key: str,
     range_key: str,
 ) -> tuple[str, str] | None:
+    from .database import catalog_object_type
+    from .price_daily import COLUMN_TO_SOURCE_FINISH, PRICE_DAILY_VALUE_COLUMNS, price_daily_date_bounds_for_columns
+
     source_meta = chart_price_source(source_key)
     currency = source_meta["currency"]
     sources = chart_price_sources_for_key(source_key)
+    if catalog_object_type(conn, "price_snapshots") == "view":
+        columns = [
+            column
+            for column in PRICE_DAILY_VALUE_COLUMNS
+            if COLUMN_TO_SOURCE_FINISH[column][0] in sources
+        ]
+        bounds = price_daily_date_bounds_for_columns(conn, columns)
+        if bounds:
+            latest_date = date.fromisoformat(bounds[1])
+            days = CHART_RANGE_DAYS.get(range_key, 7)
+            cutoff = (latest_date - timedelta(days=days)).isoformat()
+            start_date = bounds[0] if bounds[0] >= cutoff else cutoff
+            return start_date, bounds[1]
     source_placeholders = ",".join("?" for _ in sources)
     snapshots_table = catalog_table("price_snapshots")
     latest_row = conn.execute(
@@ -2627,8 +3554,18 @@ def scryfall_ids_priced_on_date(
     finish: str = "nonfoil",
 ) -> list[str]:
     source_meta = chart_price_source(source_key)
-    currency = source_meta["currency"]
     sources = chart_price_sources_for_key(source_key)
+    from .price_daily import column_for_chart_source, scryfall_ids_priced_on_daily_date, reads_price_daily
+
+    if reads_price_daily(conn):
+        primary_source = source_meta["source"]
+        if primary_source == "cardmarket-guide":
+            primary_source = "scryfall-cardmarket"
+        column = column_for_chart_source(primary_source, finish)
+        if column:
+            return scryfall_ids_priced_on_daily_date(conn, snapshot_date, column)
+
+    currency = source_meta["currency"]
     source_placeholders = ",".join("?" for _ in sources)
     snapshots_table = catalog_table("price_snapshots")
     rows = conn.execute(
@@ -2773,8 +3710,15 @@ def select_speculative_picks(
 ) -> list[dict[str, Any]]:
     contexts: dict[str, dict[str, Any]] = {}
     cm_latest: dict[str, dict[str, Any]] = {}
+    eval_pool = movers_raw
+    if len(movers_raw) > MARKET_SPECULATIVE_EVAL_LIMIT:
+        eval_pool = sorted(
+            movers_raw,
+            key=lambda item: abs(float(item.get("change_pct") or 0)),
+            reverse=True,
+        )[:MARKET_SPECULATIVE_EVAL_LIMIT]
     if conn is not None and start_date:
-        scryfall_ids = [row["scryfall_id"] for row in movers_raw if row.get("scryfall_id")]
+        scryfall_ids = [row["scryfall_id"] for row in eval_pool if row.get("scryfall_id")]
         set_codes = batch_card_set_codes(conn, scryfall_ids)
         pre_stats = batch_price_pre_period_stats(
             conn,
@@ -2788,7 +3732,7 @@ def select_speculative_picks(
             else {}
         )
         reference_date = as_of_date or start_date
-        for item in movers_raw:
+        for item in eval_pool:
             card_id = item.get("scryfall_id")
             if not card_id:
                 continue
@@ -2802,7 +3746,7 @@ def select_speculative_picks(
             )
 
     ranked: list[tuple[float, dict[str, Any]]] = []
-    for item in movers_raw:
+    for item in eval_pool:
         card_id = item.get("scryfall_id")
         cm_entry = cm_latest.get(card_id) if card_id and source_key == "cardmarket" else None
         if options and options.exclude_illiquid and cm_entry:
@@ -2948,6 +3892,19 @@ def market_mover_rows_from_snapshots(
     source_meta = chart_price_source(source_key)
     currency = source_meta["currency"]
     sources = chart_price_sources_for_key(source_key)
+    from .price_daily import column_for_chart_source, market_mover_rows_from_daily_column, reads_price_daily
+
+    if reads_price_daily(conn) and len(sources) == 1:
+        column = column_for_chart_source(sources[0], finish)
+        if column:
+            return market_mover_rows_from_daily_column(
+                conn,
+                column=column,
+                start_date=start_date,
+                end_date=end_date,
+                eligible_set_codes=codes,
+            )
+
     snapshots = catalog_table("price_snapshots")
     cards_table = catalog_table("cards")
     source_placeholders = ",".join("?" for _ in sources)
@@ -3113,6 +4070,14 @@ def market_price_movers(
     *,
     limit: int = MARKET_MOVERS_LIMIT,
 ) -> dict[str, Any]:
+    cached = get_cached_market_movers(source_key, options, range_key)
+    if cached is not None:
+        return cached
+    persisted = load_persisted_market_movers(conn, source_key, options, range_key)
+    if persisted is not None:
+        cache_market_movers(source_key, options, range_key, persisted)
+        return persisted
+
     source_meta = chart_price_source(source_key)
     currency = source_meta["currency"]
     bounds = snapshot_period_bounds(conn, source_key, range_key)
@@ -3152,6 +4117,22 @@ def market_price_movers(
         eligible_set_codes=eligible_sets,
         price_metric=options.market_price_metric,
     )
+    if not candidates:
+        return {**empty, "start_date": start_date, "end_date": end_date}
+    if options.market_scope == "owned":
+        from .collection_extras import owned_scryfall_id_set
+
+        allowed = owned_scryfall_id_set(conn)
+        candidates = [row for row in candidates if row["scryfall_id"] in allowed]
+        scope["label"] = "Cartes de ma collection"
+        scope["filter"] = "owned"
+    elif options.market_scope == "wishlist":
+        from .collection_extras import wishlist_scryfall_id_set
+
+        allowed = wishlist_scryfall_id_set(conn)
+        candidates = [row for row in candidates if row["scryfall_id"] in allowed]
+        scope["label"] = "Cartes de ma wishlist"
+        scope["filter"] = "wishlist"
     if not candidates:
         return {**empty, "start_date": start_date, "end_date": end_date}
     filter_by_rarity = any(
@@ -3199,7 +4180,7 @@ def market_price_movers(
         as_of_date=end_date,
         options=options,
     )
-    return {
+    payload = {
         "range": range_key,
         "start_date": start_date,
         "end_date": end_date,
@@ -3252,6 +4233,9 @@ def market_price_movers(
         ),
         "excluded_by_rarity": excluded_by_rarity,
     }
+    cache_market_movers(source_key, options, range_key, payload)
+    persist_market_movers(conn, source_key, options, range_key, payload)
+    return payload
 
 
 def mover_entry_json(
@@ -3595,6 +4579,99 @@ def run_price_archive_job(*, force: bool = False) -> None:
         )
 
 
+def weekly_backup_status_payload() -> dict[str, Any]:
+    from .weekly_backup import weekly_backup_status
+
+    with WEEKLY_BACKUP_LOCK:
+        status = dict(WEEKLY_BACKUP_STATUS)
+    status["schedule"] = weekly_backup_status()
+    return status
+
+
+def update_weekly_backup_status(**updates: Any) -> None:
+    with WEEKLY_BACKUP_LOCK:
+        WEEKLY_BACKUP_STATUS.update(updates)
+
+
+def start_weekly_backup_job(*, force: bool = False) -> bool:
+    with WEEKLY_BACKUP_LOCK:
+        if WEEKLY_BACKUP_STATUS["running"]:
+            return False
+        WEEKLY_BACKUP_STATUS.update(
+            {
+                "running": True,
+                "phase": "starting",
+                "message": "Demarrage backup hebdo...",
+                "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "finished_at": None,
+                "error": None,
+                "skipped": False,
+            }
+        )
+
+    thread = threading.Thread(target=run_weekly_backup_job, kwargs={"force": force}, daemon=True)
+    thread.start()
+    return True
+
+
+def run_weekly_backup_job(*, force: bool = False) -> None:
+    from .weekly_backup import run_weekly_backup
+
+    def on_log(message: str) -> None:
+        update_weekly_backup_status(message=message, phase="running")
+
+    try:
+        update_weekly_backup_status(running=True, phase="running", message="Backup en cours...")
+        result = run_weekly_backup(force=force, on_log=on_log)
+        update_weekly_backup_status(
+            running=False,
+            phase="skipped" if result.get("skipped") else "done",
+            finished_at=result.get("finished_at"),
+            skipped=bool(result.get("skipped")),
+            rows_incremental=result.get("rows_incremental", 0),
+            rows_snapshot=result.get("rows_snapshot", 0),
+            backup_size_gb=result.get("backup_size_gb"),
+            error=result.get("error"),
+            message="Backup deja fait cette semaine" if result.get("skipped") else "Backup hebdo termine",
+        )
+    except Exception as error:  # noqa: BLE001
+        update_weekly_backup_status(
+            running=False,
+            phase="error",
+            error=str(error),
+            finished_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            message=f"Erreur backup: {error}",
+        )
+
+
+def log_db_audit_warnings() -> None:
+    from .db_audit import collect_db_audit
+
+    try:
+        audit = collect_db_audit()
+        print(
+            f"[db-audit] {audit['db_files']['main'].get('size_gb')} Go — {audit['overall_status']}",
+            flush=True,
+        )
+        for warning in audit.get("warnings") or []:
+            print(f"[db-audit] [{warning['level']}] {warning['message']}", flush=True)
+    except Exception as error:  # noqa: BLE001
+        print(f"[db-audit] impossible: {error}", flush=True)
+
+
+def maybe_start_weekly_backup() -> None:
+    from .weekly_backup import weekly_backup_status
+
+    try:
+        status = weekly_backup_status()
+        if not status.get("due"):
+            return
+        if start_weekly_backup_job(force=False):
+            print("[weekly-backup] demarrage automatique (>= 7 jours)", flush=True)
+    except Exception as error:  # noqa: BLE001
+        print(f"[weekly-backup] check ignore: {error}", flush=True)
+
+
 def maybe_start_daily_price_archive() -> None:
     if os.environ.get("MTG_PWA_SKIP_AUTO_ARCHIVE", "").lower() in {"1", "true", "yes", "on"}:
         return
@@ -3688,7 +4765,7 @@ def run_startup_warmup_job(*, force: bool = False) -> None:
             market_ranges_warmed=result.get("market_ranges_warmed", 0),
         )
         if not result.get("skipped"):
-            invalidate_collection_blocks_cache()
+            invalidate_collection_blocks_cache(skip_index=True)
     except Exception as error:  # noqa: BLE001 - background warmup should capture failures.
         update_startup_warmup_status(
             running=False,
@@ -3998,7 +5075,7 @@ def rulings_to_json(rulings: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def run(host: str = "127.0.0.1", port: int = 8000) -> None:
     sync_build_info()
-    invalidate_collection_blocks_cache()
+    invalidate_collection_blocks_cache(skip_index=True)
     with open_db() as conn:
         from .database import get_app_metadata
 
@@ -4011,4 +5088,6 @@ def run(host: str = "127.0.0.1", port: int = 8000) -> None:
     print(f"Catalogue collection v{COLLECTION_CATALOG_VERSION} (Secret Lair, Universes Beyond)")
     print("Ctrl+C pour arreter le serveur.")
     maybe_start_daily_price_archive()
+    log_db_audit_warnings()
+    maybe_start_weekly_backup()
     server.serve_forever()

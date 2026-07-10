@@ -197,6 +197,41 @@ def warm_deck_index() -> dict[str, int]:
     return {"decks_indexed": len(decks or [])}
 
 
+def warm_collection_index_sync(conn) -> dict[str, Any]:
+    from .collection_index import schedule_collection_index_sync
+
+    row = conn.execute("SELECT COUNT(*) AS c FROM collection_index_dirty").fetchone()
+    dirty = int(row["c"] or 0)
+    if dirty > 0:
+        schedule_collection_index_sync()
+        return {"dirty_rows": dirty, "scheduled": True}
+    return {"dirty_rows": 0, "scheduled": False}
+
+
+def warm_my_collection_tab(conn) -> dict[str, int]:
+    from .sets_catalog import list_owned_collection_cards
+
+    payload = list_owned_collection_cards(conn, display_lang="fr", limit=100, offset=0)
+    return {"cards_warmed": len(payload.get("cards") or [])}
+
+
+def warm_collection_history_fast(conn) -> dict[str, int]:
+    from .collection_extras import cardmarket_archive_status
+    from .server import HistoryBuildOptions, cache_collection_history, collection_valuation_history_fast
+
+    archive_meta = cardmarket_archive_status(conn)
+    options = HistoryBuildOptions(history_mode="fast")
+    payload = collection_valuation_history_fast(
+        conn,
+        "cardmarket",
+        options,
+        range_key="7d",
+        archive_meta=archive_meta,
+    )
+    cache_collection_history("cardmarket", options, "7d", payload)
+    return {"history_points": len(payload.get("history") or [])}
+
+
 def warm_market_tab(
     conn,
     *,
@@ -359,6 +394,20 @@ def run_startup_warmup(
                     "market_ranges_warmed": market_stats["ranges_warmed"],
                 }
             )
+        finally:
+            conn.close()
+
+        status(phase="my_collection", message="Index Ma collection...", progress=96, skipped=skip_heavy)
+        conn = connect()
+        init_db(conn)
+        try:
+            collection_stats = warm_my_collection_tab(conn)
+            result["my_collection_cards_warmed"] = collection_stats["cards_warmed"]
+            index_stats = warm_collection_index_sync(conn)
+            result["index_sync_scheduled"] = index_stats.get("scheduled", False)
+            result["index_dirty_rows"] = index_stats.get("dirty_rows", 0)
+            history_stats = warm_collection_history_fast(conn)
+            result["collection_history_points"] = history_stats["history_points"]
         finally:
             conn.close()
 

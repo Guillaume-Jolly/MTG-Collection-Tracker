@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from mtg_pwa.database import adjust_collection_quantity, connect, init_db, save_card
-from mtg_pwa.server import collection_valuation_history
+from mtg_pwa.server import HistoryBuildOptions, collection_valuation_history
 
 
 class CollectionHistoryTest(unittest.TestCase):
@@ -45,7 +45,11 @@ class CollectionHistoryTest(unittest.TestCase):
             )
             conn.commit()
 
-            payload = collection_valuation_history(conn, "cardmarket")
+            payload = collection_valuation_history(
+                conn,
+                "cardmarket",
+                HistoryBuildOptions(history_mode="archive"),
+            )
             conn.close()
 
             self.assertAlmostEqual(payload["current_total_eur"], 7.5)

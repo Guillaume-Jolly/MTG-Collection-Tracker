@@ -1406,6 +1406,110 @@ code {
   padding-left: 1rem;
 }
 
+.cardmarket-order-totals {
+  margin: 0.5rem 0 0.75rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: 0.5rem;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.cardmarket-order-totals p {
+  margin: 0.25rem 0;
+}
+
+.market-movers-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.market-movers-toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.mover-row-wrap {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 0.35rem;
+  align-items: stretch;
+}
+
+.mover-row-wrap .mover-row {
+  min-width: 0;
+}
+
+.mover-row-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.mover-action-btn {
+  padding: 0.15rem 0.35rem;
+  font-size: 0.72rem;
+  min-width: 2.2rem;
+}
+
+.mover-wishlist-badge,
+.mover-undervalued-badge {
+  display: inline-block;
+  margin-left: 0.35rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  background: rgba(120, 180, 255, 0.18);
+}
+
+.mover-undervalued-badge {
+  background: rgba(120, 220, 140, 0.18);
+}
+
+.mover-low-trend {
+  display: block;
+  font-size: 0.78rem;
+}
+
+.trade-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.75rem;
+  margin: 0.75rem 0;
+}
+
+.trade-summary-card {
+  padding: 0.65rem 0.75rem;
+  border-radius: 0.55rem;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.trade-summary-card span {
+  display: block;
+  font-size: 0.78rem;
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.trade-lists-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.trade-export-row {
+  flex-wrap: wrap;
+}
+
+.trade-import-panel {
+  margin-top: 1rem;
+}
+
 .market-movers-legend {
   margin: 0.65rem 0 0;
   font-size: 0.78rem;
@@ -1744,9 +1848,32 @@ code {
 }
 
 .detail-finish-price {
+  align-items: center;
   color: var(--accent-2);
+  display: inline-flex;
   font-size: 0.72rem;
   font-weight: 600;
+  gap: 0.25rem;
+}
+
+.detail-finish-price-hint {
+  color: var(--muted);
+  cursor: help;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.detail-finish-price-na {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-style: italic;
+  font-weight: 600;
+}
+
+.detail-hero-cm-unavailable {
+  font-size: 0.62rem;
+  line-height: 1.3;
 }
 
 .detail-finish-controls {
@@ -1827,6 +1954,78 @@ code {
   display: grid;
   gap: 0.45rem;
   min-width: 0;
+}
+
+.detail-hero-aside-top {
+  display: grid;
+  gap: 0.65rem;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.detail-hero-copy {
+  min-width: 0;
+}
+
+.detail-hero-cm {
+  background: rgba(18, 15, 29, 0.72);
+  border: 1px solid rgba(184, 173, 201, 0.16);
+  border-radius: 0.75rem;
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+  padding: 0.55rem 0.6rem;
+}
+
+.detail-hero-cm-head {
+  align-items: baseline;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.35rem;
+}
+
+.detail-hero-cm-product {
+  font-size: 0.68rem;
+  line-height: 1.3;
+}
+
+.detail-hero-cm .cardmarket-metrics-grid {
+  gap: 0.25rem 0.45rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.detail-hero-cm .cardmarket-metric dt {
+  font-size: 0.62rem;
+}
+
+.detail-hero-cm .cardmarket-metric dd {
+  font-size: 0.72rem;
+}
+
+.detail-hero-cm-finish {
+  border-top: 1px solid rgba(184, 173, 201, 0.1);
+  display: grid;
+  gap: 0.25rem;
+  margin-top: 0.15rem;
+  padding-top: 0.35rem;
+}
+
+.detail-hero-cm-finish-label {
+  color: var(--muted);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.detail-hero-cm-link {
+  color: var(--accent-2);
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.detail-hero-cm-link:hover {
+  text-decoration: underline;
 }
 
 .detail-hero-aside h3 {
@@ -2543,6 +2742,303 @@ code {
   opacity: 0.45;
 }
 
+.my-collection-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1rem;
+  align-items: end;
+  margin-bottom: 0.75rem;
+}
+
+.my-collection-filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+}
+
+.catalog-card-price-source {
+  display: block;
+  font-size: 0.65rem;
+  opacity: 0.75;
+}
+
+.my-collection-loading {
+  min-height: 4rem;
+}
+
+.my-collection-tools-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0.5rem 0 0.75rem;
+}
+
+.my-collection-tools-nav .active {
+  border-color: var(--accent, #6b9fff);
+}
+
+.portfolio-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: 1rem;
+}
+
+.portfolio-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.15rem 0;
+}
+
+.wishlist-list,
+.binder-table {
+  width: 100%;
+}
+
+.wishlist-screen-head {
+  align-items: flex-start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.wishlist-grid .wishlist-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.wishlist-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.35rem 0.25rem 0;
+}
+
+.wishlist-card-name {
+  font-size: 0.85rem;
+  line-height: 1.2;
+}
+
+.wishlist-card-prices {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.wishlist-max-price,
+.wishlist-priority {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.wishlist-priority {
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 0.25rem;
+  left: 0.25rem;
+  padding: 0.1rem 0.35rem;
+  position: absolute;
+  top: 0.25rem;
+}
+
+.wishlist-card-actions {
+  margin-top: auto;
+  padding: 0.25rem;
+}
+
+.binder-panel-head {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.binder-page-nav {
+  align-items: center;
+  display: flex;
+  gap: 0.35rem;
+}
+
+.binder-page-grid {
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: repeat(var(--binder-cols, 3), minmax(0, 1fr));
+}
+
+.binder-slot {
+  aspect-ratio: 5 / 7;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+  border-radius: 0.35rem;
+  position: relative;
+}
+
+.binder-slot-filled {
+  border-style: solid;
+  cursor: pointer;
+}
+
+.binder-slot-empty {
+  align-items: center;
+  display: flex;
+  justify-content: center;
+}
+
+.binder-slot-image {
+  height: 100%;
+  overflow: hidden;
+  width: 100%;
+}
+
+.binder-slot-image img {
+  display: block;
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
+.binder-slot-placeholder {
+  height: 100%;
+  width: 100%;
+}
+
+.binder-slot-label {
+  background: rgba(0, 0, 0, 0.65);
+  border-radius: 0.2rem;
+  bottom: 0.2rem;
+  font-size: 0.65rem;
+  left: 0.2rem;
+  padding: 0.05rem 0.3rem;
+  position: absolute;
+}
+
+.binder-slot-remove {
+  line-height: 1;
+  min-width: 1.5rem;
+  padding: 0.1rem 0.35rem;
+  position: absolute;
+  right: 0.15rem;
+  top: 0.15rem;
+}
+
+body.wishlist-full-width main {
+  max-width: none;
+}
+
+body.alerts-full-width main,
+body.trade-full-width main {
+  max-width: none;
+}
+
+.wishlist-max-price.is-good {
+  color: #6bcb77;
+}
+
+.wishlist-max-price.is-over {
+  color: #e57373;
+}
+
+.alerts-screen-head,
+.trade-screen .form-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.alerts-list li,
+.alerts-history li,
+.trade-list li {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: space-between;
+  padding: 0.35rem 0;
+}
+
+.deck-to-buy-list {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+}
+
+.deck-to-buy-list li {
+  align-items: center;
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.25rem 0;
+}
+
+.deck-tobuy-thumb {
+  height: 2.5rem;
+  object-fit: cover;
+  width: 1.8rem;
+}
+
+.shortcuts-dialog {
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 0.5rem;
+  max-width: 24rem;
+  padding: 1rem;
+}
+
+.shortcuts-list {
+  line-height: 1.8;
+  margin: 0.5rem 0 1rem;
+  padding-left: 1rem;
+}
+
+.shortcuts-list kbd {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 0.2rem;
+  padding: 0.1rem 0.35rem;
+}
+
+.detail-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.5rem;
+}
+
+.header-stat-archive {
+  font-size: 0.75rem;
+  min-width: 4.5rem;
+}
+
+.header-stat-archive.is-warning {
+  color: #e6a700;
+}
+
+.header-stat-db {
+  font-size: 0.75rem;
+  min-width: 5rem;
+}
+
+.header-stat-db.is-warning {
+  color: #e6a700;
+}
+
+.header-stat-db.is-critical {
+  color: #e05555;
+}
+
+.my-collection-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  justify-content: center;
+  margin: 0.75rem 0 0.25rem;
+}
+
 .page-ellipsis {
   align-items: center;
   color: var(--muted);
@@ -3148,6 +3644,10 @@ code {
 
   .detail-hero-aside {
     flex: 0 0 auto;
+  }
+
+  .detail-hero-aside-top {
+    grid-template-columns: minmax(0, 1fr) minmax(10rem, 13rem);
   }
 
   .detail-hero-printings {
