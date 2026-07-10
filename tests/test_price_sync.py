@@ -62,8 +62,8 @@ class PriceSyncTest(unittest.TestCase):
         )
         price_entry = {
             "paper": {
-                "cardmarket": {
-                    "currency": "EUR",
+                "cardkingdom": {
+                    "currency": "USD",
                     "retail": {"normal": {"2024-01-01": 1.5}},
                 }
             }

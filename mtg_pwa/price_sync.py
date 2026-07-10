@@ -18,6 +18,23 @@ def scryfall_prices_fresh(conn, card: dict[str, Any]) -> bool:
     updated_at = card.get("updated_at")
     if not updated_at:
         return False
+    from .price_daily import reads_price_daily
+
+    if reads_price_daily(conn):
+        row = conn.execute(
+            """
+            SELECT source_updated_at
+            FROM price_daily
+            WHERE scryfall_id = ?
+              AND sf_cm_nonfoil IS NOT NULL
+            ORDER BY snapshot_date DESC
+            LIMIT 1
+            """,
+            (card["id"],),
+        ).fetchone()
+        if row is not None and row[0]:
+            return row[0] == updated_at
+
     snapshots_table = catalog_table("price_snapshots")
     row = conn.execute(
         f"""
@@ -54,6 +71,46 @@ def mtgjson_snapshots_need_sync(
     mtgjson_points = [point for point in points if str(point.get("source", "")).startswith("mtgjson-")]
     if not mtgjson_points:
         return False
+
+    from .price_daily import column_for_point, reads_price_daily
+
+    trackable_points = [
+        point
+        for point in mtgjson_points
+        if column_for_point(str(point.get("source") or ""), str(point.get("finish") or "nonfoil"))
+    ]
+    if not trackable_points:
+        return False
+
+    if reads_price_daily(conn):
+        latest_by_source: dict[str, str] = {}
+        for point in trackable_points:
+            source = point["source"]
+            snapshot_date = point["snapshot_date"]
+            if source not in latest_by_source or snapshot_date > latest_by_source[source]:
+                latest_by_source[source] = snapshot_date
+        stored_count = 0
+        for source, file_latest in latest_by_source.items():
+            finish = next(
+                (str(point.get("finish") or "nonfoil") for point in trackable_points if point["source"] == source),
+                "nonfoil",
+            )
+            column = column_for_point(source, finish)
+            if column is None:
+                continue
+            row = conn.execute(
+                f"""
+                SELECT MAX(snapshot_date) AS latest, COUNT({column}) AS quantity
+                FROM price_daily
+                WHERE scryfall_id = ? AND {column} IS NOT NULL
+                """,
+                (scryfall_id,),
+            ).fetchone()
+            stored_count += int(row[1] or 0)
+            db_latest = row[0]
+            if db_latest is None or db_latest < file_latest:
+                return True
+        return stored_count < int(len(trackable_points) * 0.75)
 
     snapshots_table = catalog_table("price_snapshots")
     count_row = conn.execute(

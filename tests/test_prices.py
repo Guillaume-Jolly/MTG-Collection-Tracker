@@ -16,7 +16,14 @@ from mtg_pwa.database import (
     save_fallback_price_snapshot,
     save_price_snapshots,
 )
-from mtg_pwa.prices import available_finishes_for_card, current_eur_price, extract_eur_prices, parse_price
+from mtg_pwa.prices import (
+    FINISH_DUPLICATED_SOURCE,
+    available_finishes_for_card,
+    current_eur_price,
+    display_finishes_for_card,
+    extract_eur_prices,
+    parse_price,
+)
 
 
 class PriceSelectionTest(unittest.TestCase):
@@ -211,6 +218,223 @@ class PriceSelectionTest(unittest.TestCase):
         self.assertFalse(periods["1y"]["available"])
         self.assertFalse(periods["5y"]["available"])
 
+
+    def test_card_summary_always_shows_foil_with_na_when_cardmarket_phantom(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "test.sqlite3")
+            init_db(conn)
+            from mtg_pwa.database import cardmarket_product_insights, save_cardmarket_price_guide_daily
+
+            card = {
+                "id": "00000000-0000-0000-0000-000000000010",
+                "name": "Aboleth Spawn",
+                "finishes": ["nonfoil"],
+                "prices": {"eur": "8.25"},
+            }
+            save_card(conn, card)
+            save_price_snapshots(conn, card)
+            conn.execute(
+                """
+                INSERT INTO cardmarket_product_map (
+                    id_product, scryfall_id, set_code, collector_number, mapped_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (661288, card["id"], "CLB", "662", "2026-07-08T00:00:00+00:00"),
+            )
+            save_cardmarket_price_guide_daily(
+                conn,
+                [
+                    {
+                        "id_product": 661288,
+                        "snapshot_date": "2026-07-08",
+                        "trend": 8.25,
+                        "trend_foil": 3.5,
+                        "avg7": 8.29,
+                        "avg7_foil": 3.5,
+                        "low_price": 7.0,
+                        "low_foil": None,
+                        "avg": 8.53,
+                        "avg_foil": None,
+                        "guide_version": 1,
+                        "guide_created_at": "2026-07-08",
+                        "collected_at": "2026-07-08T00:00:00+00:00",
+                    }
+                ],
+            )
+            conn.commit()
+
+            summary = card_summary(conn, card, "nonfoil")
+            insights = cardmarket_product_insights(conn, card)
+
+            self.assertEqual(summary["available_finishes"], ["nonfoil", "foil"])
+            self.assertTrue(summary["prices_by_finish"]["foil"]["unavailable"])
+            self.assertEqual(summary["prices_by_finish"]["foil"]["unavailable_reason"], "cardmarket-no-stock")
+            self.assertEqual(summary["foil_availability"]["status"], "unavailable")
+            self.assertIsNotNone(insights)
+            assert insights is not None
+            self.assertEqual(insights["foil_status"], "unavailable")
+            self.assertIsNone(insights["foil"])
+            conn.close()
+
+    def test_card_summary_includes_foil_when_scryfall_declares_finish(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "test.sqlite3")
+            init_db(conn)
+            card = {
+                "id": "00000000-0000-0000-0000-000000000012",
+                "name": "Real Foil Card",
+                "finishes": ["nonfoil", "foil"],
+                "prices": {"eur": "2.00", "eur_foil": "4.00"},
+            }
+            save_card(conn, card)
+            save_price_snapshots(conn, card)
+            conn.commit()
+
+            summary = card_summary(conn, card, "nonfoil")
+
+            self.assertEqual(summary["available_finishes"], ["nonfoil", "foil"])
+            self.assertEqual(summary["prices_by_finish"]["foil"]["price"], 4.0)
+            conn.close()
+
+    def test_card_summary_duplicates_nonfoil_price_for_foil_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "test.sqlite3")
+            init_db(conn)
+            card = {
+                "id": "00000000-0000-0000-0000-000000000011",
+                "name": "Only Nonfoil",
+                "finishes": ["nonfoil", "foil"],
+                "prices": {"eur": "2.00"},
+            }
+            save_card(conn, card)
+            save_price_snapshots(conn, card)
+            conn.commit()
+
+            summary = card_summary(conn, card, "nonfoil")
+
+            self.assertEqual(summary["available_finishes"], ["nonfoil", "foil"])
+            self.assertEqual(summary["prices_by_finish"]["foil"]["price"], 2.0)
+            self.assertEqual(
+                summary["prices_by_finish"]["foil"]["source"],
+                "scryfall-cardmarket-finish-duplicated",
+            )
+            self.assertEqual(summary["prices_by_finish"]["foil"]["duplicate_from_finish"], "nonfoil")
+            conn.close()
+
+    def test_card_summary_uses_pure_scryfall_price_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "test.sqlite3")
+            init_db(conn)
+            card = {
+                "id": "00000000-0000-0000-0000-000000000013",
+                "name": "Pure Price Card",
+                "finishes": ["nonfoil", "foil"],
+                "prices": {"eur": "5.00"},
+            }
+            save_card(conn, card)
+            save_price_snapshots(conn, card)
+            conn.execute(
+                """
+                INSERT INTO price_snapshots (
+                    scryfall_id, currency, finish, price, source, snapshot_date,
+                    collected_at, source_updated_at
+                )
+                VALUES (?, 'EUR', 'foil', ?, 'mtgjson-cardmarket', '2026-07-08', ?, NULL)
+                """,
+                (card["id"], 12.0, "2026-07-08T00:00:00+00:00"),
+            )
+            conn.commit()
+
+            summary = card_summary(conn, card, "nonfoil")
+
+            self.assertEqual(summary["available_finishes"], ["nonfoil", "foil"])
+            self.assertEqual(summary["prices_by_finish"]["foil"]["price"], 5.0)
+            self.assertEqual(summary["prices_by_finish"]["foil"]["source"], FINISH_DUPLICATED_SOURCE)
+            conn.close()
+
+    def test_display_finishes_always_includes_foil(self) -> None:
+        card = {"finishes": ["nonfoil"]}
+        self.assertEqual(display_finishes_for_card(card), ["nonfoil", "foil"])
+        etched_card = {"finishes": ["nonfoil", "etched"]}
+        self.assertEqual(display_finishes_for_card(etched_card), ["nonfoil", "foil", "etched"])
+        foil_only = {"finishes": ["foil"], "prices": {"eur_foil": "10.00"}}
+        self.assertEqual(display_finishes_for_card(foil_only), ["foil"])
+
+    def test_cardmarket_foil_row_is_phantom_without_stock(self) -> None:
+        from mtg_pwa.database import cardmarket_foil_row_is_phantom
+
+        self.assertTrue(
+            cardmarket_foil_row_is_phantom(
+                {
+                    "trend_foil": 3.5,
+                    "low_foil": None,
+                    "avg_foil": None,
+                    "avg7_foil": 3.5,
+                }
+            )
+        )
+        self.assertFalse(
+            cardmarket_foil_row_is_phantom(
+                {
+                    "trend_foil": 3.5,
+                    "low_foil": 2.99,
+                    "avg_foil": None,
+                }
+            )
+        )
+
+    def test_cardmarket_product_insights_ignores_phantom_foil(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "test.sqlite3")
+            init_db(conn)
+            from mtg_pwa.database import cardmarket_product_insights, save_cardmarket_price_guide_daily
+
+            card = {
+                "id": "00000000-0000-0000-0000-000000000014",
+                "name": "Aboleth",
+                "finishes": ["nonfoil"],
+            }
+            save_card(conn, card)
+            conn.execute(
+                """
+                INSERT INTO cardmarket_product_map (
+                    id_product, scryfall_id, set_code, collector_number, mapped_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (661288, card["id"], "CLB", "662", "2026-07-08T00:00:00+00:00"),
+            )
+            save_cardmarket_price_guide_daily(
+                conn,
+                [
+                    {
+                        "id_product": 661288,
+                        "snapshot_date": "2026-07-08",
+                        "trend": 8.25,
+                        "trend_foil": 3.5,
+                        "avg7": 8.29,
+                        "avg7_foil": 3.5,
+                        "low_price": 7.0,
+                        "low_foil": None,
+                        "avg": 8.53,
+                        "avg_foil": None,
+                        "guide_version": 1,
+                        "guide_created_at": "2026-07-08",
+                        "collected_at": "2026-07-08T00:00:00+00:00",
+                    }
+                ],
+            )
+            conn.commit()
+
+            insights = cardmarket_product_insights(conn, card)
+
+            self.assertIsNotNone(insights)
+            assert insights is not None
+            self.assertIsNone(insights["foil"])
+            self.assertEqual(insights["foil_status"], "unavailable")
+            self.assertEqual(insights["nonfoil"]["trend"], 8.25)
+            conn.close()
 
     def test_latest_snapshot_prefers_scryfall_over_mtgjson(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

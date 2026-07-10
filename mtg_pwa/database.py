@@ -11,8 +11,12 @@ from typing import Any, Iterable
 from .local_cache import local_image_url
 from .prices import (
     CHART_PRICE_SOURCES,
+    FINISH_DUPLICATED_SOURCE,
+    FINISH_ORDER,
+    VALID_FINISHES,
     PricePoint,
     available_finishes_for_card,
+    display_finishes_for_card,
     chart_price_source,
     chart_price_source_keys,
     current_eur_price,
@@ -60,6 +64,15 @@ def catalog_table(table_name: str) -> str:
     if uses_shared_catalog():
         return f"{SHARED_CATALOG_SCHEMA}.{table_name}"
     return table_name
+
+
+def catalog_object_type(conn: sqlite3.Connection, object_name: str) -> str | None:
+    bare_name = object_name.split(".")[-1]
+    row = conn.execute(
+        "SELECT type FROM sqlite_master WHERE name = ?",
+        (bare_name,),
+    ).fetchone()
+    return str(row[0]) if row else None
 
 
 def attach_shared_catalog(conn: sqlite3.Connection) -> None:
@@ -200,13 +213,8 @@ def init_db(conn: sqlite3.Connection) -> None:
             CREATE INDEX IF NOT EXISTS idx_cards_name ON cards(name);
             CREATE INDEX IF NOT EXISTS idx_cards_oracle_id ON cards(oracle_id);
             CREATE INDEX IF NOT EXISTS idx_collection_card ON collection_items(scryfall_id);
-            CREATE INDEX IF NOT EXISTS idx_price_card_finish ON price_snapshots(scryfall_id, finish, currency, snapshot_date);
             CREATE INDEX IF NOT EXISTS idx_cards_set_code ON cards(set_code);
             CREATE INDEX IF NOT EXISTS idx_cards_set_collector ON cards(set_code, collector_number);
-            CREATE INDEX IF NOT EXISTS idx_price_market_lookup
-                ON price_snapshots(finish, currency, source, snapshot_date, scryfall_id);
-            CREATE INDEX IF NOT EXISTS idx_price_card_source_date
-                ON price_snapshots(scryfall_id, finish, currency, source, snapshot_date);
             """
         )
     else:
@@ -217,6 +225,15 @@ def init_db(conn: sqlite3.Connection) -> None:
         )
     ensure_catalog_indexes(conn)
     ensure_cardmarket_schema(conn)
+    from .collection_index import ensure_collection_app_tables
+    from .price_daily import ensure_price_daily_schema, install_price_snapshots_view
+
+    ensure_price_daily_schema(conn)
+    if catalog_object_type(conn, "price_snapshots") == "view" or catalog_object_type(
+        conn, "price_snapshots_legacy"
+    ) == "table":
+        install_price_snapshots_view(conn)
+    ensure_collection_app_tables(conn)
     conn.commit()
     backfill_owned_decks_from_imports(conn)
 
@@ -284,6 +301,14 @@ def ensure_catalog_indexes(conn: sqlite3.Connection) -> None:
     conn.execute(
         f"CREATE INDEX IF NOT EXISTS idx_cards_set_collector ON {cards_table}(set_code, collector_number)"
     )
+    if catalog_object_type(conn, "price_snapshots") == "view":
+        return
+    conn.execute(
+        f"""
+        CREATE INDEX IF NOT EXISTS idx_price_card_finish
+        ON {snapshots_table}(scryfall_id, finish, currency, snapshot_date)
+        """
+    )
     conn.execute(
         f"""
         CREATE INDEX IF NOT EXISTS idx_price_market_lookup
@@ -294,6 +319,12 @@ def ensure_catalog_indexes(conn: sqlite3.Connection) -> None:
         f"""
         CREATE INDEX IF NOT EXISTS idx_price_card_source_date
         ON {snapshots_table}(scryfall_id, finish, currency, source, snapshot_date)
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE INDEX IF NOT EXISTS idx_price_currency_source_date
+        ON {snapshots_table}(currency, source, snapshot_date)
         """
     )
 
@@ -382,38 +413,26 @@ def save_cards(conn: sqlite3.Connection, cards: Iterable[dict[str, Any]]) -> Non
 
 
 def save_price_snapshots(conn: sqlite3.Connection, card: dict[str, Any]) -> int:
+    from .price_daily import upsert_price_daily_points
+
     now = utc_now()
     snapshot_date = now[:10]
     prices = extract_eur_prices(card)
-    saved = 0
-
+    points: list[dict[str, Any]] = []
     for finish, price in prices.items():
-        snapshots_table = catalog_table("price_snapshots")
-        conn.execute(
-            f"""
-            INSERT INTO {snapshots_table} (
-                scryfall_id, currency, finish, price, source, snapshot_date,
-                collected_at, source_updated_at
-            )
-            VALUES (?, 'EUR', ?, ?, 'scryfall-cardmarket', ?, ?, ?)
-            ON CONFLICT(scryfall_id, currency, finish, source, snapshot_date)
-            DO UPDATE SET
-                price = excluded.price,
-                collected_at = excluded.collected_at,
-                source_updated_at = excluded.source_updated_at
-            """,
-            (
-                card["id"],
-                finish,
-                float(price),
-                snapshot_date,
-                now,
-                card.get("updated_at"),
-            ),
+        points.append(
+            {
+                "scryfall_id": card["id"],
+                "currency": "EUR",
+                "finish": finish,
+                "price": float(price),
+                "source": "scryfall-cardmarket",
+                "snapshot_date": snapshot_date,
+                "collected_at": now,
+                "source_updated_at": card.get("updated_at"),
+            }
         )
-        saved += 1
-
-    return saved
+    return upsert_price_daily_points(conn, points)
 
 
 def save_fallback_price_snapshot(
@@ -427,62 +446,56 @@ def save_fallback_price_snapshot(
 ) -> None:
     now = utc_now()
     snapshot_date = now[:10]
-    snapshots_table = catalog_table("price_snapshots")
-    conn.execute(
-        f"""
-        INSERT INTO {snapshots_table} (
-            scryfall_id, currency, finish, price, source, snapshot_date,
-            collected_at, source_updated_at
+    if source.startswith("scryfall-cardmarket-en-print:") and catalog_object_type(conn, "price_snapshots") == "table":
+        snapshots_table = catalog_table("price_snapshots")
+        conn.execute(
+            f"""
+            INSERT INTO {snapshots_table} (
+                scryfall_id, currency, finish, price, source, snapshot_date,
+                collected_at, source_updated_at
+            )
+            VALUES (?, 'EUR', ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(scryfall_id, currency, finish, source, snapshot_date)
+            DO UPDATE SET
+                price = excluded.price,
+                collected_at = excluded.collected_at,
+                source_updated_at = excluded.source_updated_at
+            """,
+            (
+                scryfall_id,
+                finish,
+                float(price),
+                source,
+                snapshot_date,
+                now,
+                source_updated_at,
+            ),
         )
-        VALUES (?, 'EUR', ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(scryfall_id, currency, finish, source, snapshot_date)
-        DO UPDATE SET
-            price = excluded.price,
-            collected_at = excluded.collected_at,
-            source_updated_at = excluded.source_updated_at
-        """,
-        (
-            scryfall_id,
-            finish,
-            float(price),
-            source,
-            snapshot_date,
-            now,
-            source_updated_at,
-        ),
+        return
+
+    from .price_daily import upsert_price_daily_points
+
+    upsert_price_daily_points(
+        conn,
+        [
+            {
+                "scryfall_id": scryfall_id,
+                "currency": "EUR",
+                "finish": finish,
+                "price": float(price),
+                "source": source,
+                "snapshot_date": snapshot_date,
+                "collected_at": now,
+                "source_updated_at": source_updated_at,
+            }
+        ],
     )
 
 
 def save_external_price_snapshots(conn: sqlite3.Connection, points: Iterable[dict[str, Any]]) -> int:
-    snapshots_table = catalog_table("price_snapshots")
-    sql = f"""
-        INSERT INTO {snapshots_table} (
-            scryfall_id, currency, finish, price, source, snapshot_date,
-            collected_at, source_updated_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(scryfall_id, currency, finish, source, snapshot_date)
-        DO UPDATE SET
-            price = excluded.price,
-            collected_at = excluded.collected_at
-    """
-    rows = [
-        (
-            point["scryfall_id"],
-            point["currency"],
-            point["finish"],
-            point["price"],
-            point["source"],
-            point["snapshot_date"],
-            point["collected_at"],
-            point.get("source_updated_at"),
-        )
-        for point in points
-    ]
-    if not rows:
-        return 0
-    conn.executemany(sql, rows)
-    return len(rows)
+    from .price_daily import upsert_price_daily_points
+
+    return upsert_price_daily_points(conn, points)
 
 
 def cached_mtgjson_uuid(conn: sqlite3.Connection, scryfall_id: str) -> str | None:
@@ -586,7 +599,54 @@ def language_sibling_ids_db(conn: sqlite3.Connection, card: dict[str, Any]) -> d
     return ids
 
 
+def build_language_siblings_for_collectors(
+    conn: sqlite3.Connection,
+    by_set: dict[str, set[str]],
+) -> dict[tuple[str, str], dict[str, str]]:
+    result: dict[tuple[str, str], dict[str, str]] = {}
+    if not by_set:
+        return result
+
+    cards_table = catalog_table("cards")
+    chunk_size = 400
+    for set_code, numbers in by_set.items():
+        if not numbers:
+            continue
+        normalized_set = set_code.lower()
+        numbers_list = sorted(numbers)
+        for index in range(0, len(numbers_list), chunk_size):
+            chunk = numbers_list[index : index + chunk_size]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""
+                SELECT raw_json
+                FROM {cards_table}
+                WHERE lower(set_code) = ? AND collector_number IN ({placeholders})
+                """,
+                (normalized_set, *chunk),
+            ).fetchall()
+            for row in rows:
+                payload = json.loads(row["raw_json"])
+                collector_number = str(payload.get("collector_number") or "").strip()
+                lang = str(payload.get("lang") or "en").lower()
+                if collector_number and lang in {"fr", "en"}:
+                    key = (normalized_set, collector_number)
+                    result.setdefault(key, {})[lang] = payload["id"]
+    return result
+
+
+_SET_LANGUAGE_SIBLINGS_CACHE: dict[str, dict[str, dict[str, str]]] = {}
+
+
+def clear_set_language_siblings_cache() -> None:
+    _SET_LANGUAGE_SIBLINGS_CACHE.clear()
+
+
 def build_set_language_siblings(conn: sqlite3.Connection, set_code: str) -> dict[str, dict[str, str]]:
+    key = set_code.lower()
+    cached = _SET_LANGUAGE_SIBLINGS_CACHE.get(key)
+    if cached is not None:
+        return cached
     cards_table = catalog_table("cards")
     rows = conn.execute(
         f"""
@@ -603,6 +663,7 @@ def build_set_language_siblings(conn: sqlite3.Connection, set_code: str) -> dict
         lang = str(payload.get("lang") or "en").lower()
         if collector_number and lang in {"fr", "en"}:
             by_number.setdefault(collector_number, {})[lang] = payload["id"]
+    _SET_LANGUAGE_SIBLINGS_CACHE[key] = by_number
     return by_number
 
 
@@ -655,6 +716,20 @@ def latest_snapshot(
     finish: str,
     currency: str = "EUR",
 ) -> PricePoint | None:
+    from .price_daily import latest_scryfall_cm_price, reads_price_daily
+
+    if reads_price_daily(conn) and currency == "EUR":
+        row = latest_scryfall_cm_price(conn, scryfall_id, finish)
+        if row is not None:
+            price, _snapshot_date = row
+            return PricePoint(
+                currency=currency,
+                finish=finish,
+                price=Decimal(str(price)),
+                source="scryfall-cardmarket",
+                is_fallback=False,
+            )
+
     snapshots_table = catalog_table("price_snapshots")
     row = conn.execute(
         f"""
@@ -687,6 +762,87 @@ def latest_snapshot(
     )
 
 
+def batch_latest_snapshots(
+    conn: sqlite3.Connection,
+    pairs: Iterable[tuple[str, str]],
+    currency: str = "EUR",
+) -> dict[tuple[str, str], PricePoint]:
+    wanted = {(scryfall_id, finish) for scryfall_id, finish in pairs if scryfall_id and finish}
+    if not wanted:
+        return {}
+
+    from .price_daily import batch_latest_eur_prices, reads_price_daily
+
+    if reads_price_daily(conn) and currency == "EUR":
+        daily_rows = batch_latest_eur_prices(conn, wanted)
+        result: dict[tuple[str, str], PricePoint] = {}
+        for key, (price, _source) in daily_rows.items():
+            if key not in wanted:
+                continue
+            result[key] = PricePoint(
+                currency=currency,
+                finish=key[1],
+                price=Decimal(str(price)),
+                source="scryfall-cardmarket",
+                is_fallback=False,
+            )
+        return result
+
+    scryfall_ids = sorted({scryfall_id for scryfall_id, _ in wanted})
+    placeholders = ",".join("?" for _ in scryfall_ids)
+    snapshots_table = catalog_table("price_snapshots")
+    rows = conn.execute(
+        f"""
+        SELECT ps.scryfall_id, ps.finish, ps.price, ps.source
+        FROM {snapshots_table} ps
+        INNER JOIN (
+            SELECT scryfall_id, finish, MAX(snapshot_date) AS max_date
+            FROM {snapshots_table}
+            WHERE scryfall_id IN ({placeholders}) AND currency = ?
+            GROUP BY scryfall_id, finish
+        ) latest
+          ON ps.scryfall_id = latest.scryfall_id
+         AND ps.finish = latest.finish
+         AND ps.snapshot_date = latest.max_date
+         AND ps.currency = ?
+        ORDER BY ps.collected_at DESC
+        """,
+        (*scryfall_ids, currency, currency),
+    ).fetchall()
+    result: dict[tuple[str, str], PricePoint] = {}
+    for row in rows:
+        key = (row["scryfall_id"], row["finish"])
+        if key in result or key not in wanted:
+            continue
+        source = str(row["source"] or "")
+        is_fallback = not (
+            source == "scryfall-cardmarket" or source.startswith("scryfall-cardmarket-en-print:")
+        )
+        result[key] = PricePoint(
+            currency=currency,
+            finish=row["finish"],
+            price=Decimal(str(row["price"])),
+            source=source,
+            is_fallback=is_fallback,
+        )
+    return result
+
+
+def display_price_source_label(card: dict[str, Any], finish: str, price_point: PricePoint | None) -> str:
+    if current_eur_price(card, finish) is not None:
+        return "scryfall_live"
+    if price_point is None:
+        return "none"
+    source = str(price_point.source or "")
+    if source.startswith("mtgjson"):
+        return "mtgjson"
+    if source.startswith("cardmarket") or "cardmarket" in source:
+        return "cardmarket"
+    if price_point.is_fallback:
+        return "snapshot_fallback"
+    return "snapshot"
+
+
 def display_price_for(
     conn: sqlite3.Connection,
     card: dict[str, Any],
@@ -698,16 +854,124 @@ def display_price_for(
     return latest_snapshot(conn, card["id"], finish)
 
 
+def card_declares_finish(card: dict[str, Any], finish: str) -> bool:
+    return finish in (card.get("finishes") or [])
+
+
+def pure_scryfall_price_for(
+    conn: sqlite3.Connection,
+    card: dict[str, Any],
+    finish: str,
+) -> PricePoint | None:
+    """Prix affichables : Scryfall live ou snapshot Scryfall uniquement (pas trend / MTGJSON)."""
+    current = current_eur_price(card, finish)
+    if current is not None:
+        return current
+    from .price_daily import latest_scryfall_cm_price, reads_price_daily
+
+    if reads_price_daily(conn):
+        row = latest_scryfall_cm_price(conn, card["id"], finish)
+        if row is not None:
+            price, _snapshot_date = row
+            return PricePoint(
+                currency="EUR",
+                finish=finish,
+                price=Decimal(str(price)),
+                source="scryfall-cardmarket",
+                is_fallback=False,
+            )
+
+    snapshots_table = catalog_table("price_snapshots")
+    row = conn.execute(
+        f"""
+        SELECT price, source
+        FROM {snapshots_table}
+        WHERE scryfall_id = ? AND finish = ? AND currency = 'EUR'
+          AND (
+            source = 'scryfall-cardmarket'
+            OR source LIKE 'scryfall-cardmarket-en-print:%'
+          )
+        ORDER BY snapshot_date DESC, collected_at DESC
+        LIMIT 1
+        """,
+        (card["id"], finish),
+    ).fetchone()
+    if row is None:
+        return None
+    source = str(row["source"] or "")
+    return PricePoint(
+        currency="EUR",
+        finish=finish,
+        price=Decimal(str(row["price"])),
+        source=source,
+        is_fallback=source.startswith("scryfall-cardmarket-en-print:"),
+    )
+
+
+def display_price_for_finish(
+    conn: sqlite3.Connection,
+    card: dict[str, Any],
+    finish: str,
+) -> PricePoint | None:
+    price = pure_scryfall_price_for(conn, card, finish)
+    if price is not None:
+        return price
+    if finish != "foil":
+        return None
+    if cardmarket_foil_is_phantom_for_card(conn, card):
+        return None
+    if not card_declares_finish(card, "foil"):
+        return None
+    nonfoil = pure_scryfall_price_for(conn, card, "nonfoil")
+    if nonfoil is None:
+        return None
+    return PricePoint(
+        currency=nonfoil.currency,
+        finish="foil",
+        price=nonfoil.price,
+        source=FINISH_DUPLICATED_SOURCE,
+        is_fallback=True,
+    )
+
+
+def unavailable_finish_price_json(finish: str, reason: str) -> dict[str, Any]:
+    return {
+        "currency": "EUR",
+        "finish": finish,
+        "price": None,
+        "source": "unavailable",
+        "unavailable": True,
+        "unavailable_reason": reason,
+    }
+
+
+def finish_price_payload(
+    conn: sqlite3.Connection,
+    card: dict[str, Any],
+    finish: str,
+) -> dict[str, Any] | None:
+    price = display_price_for_finish(conn, card, finish)
+    if price is not None:
+        return price_to_json(price)
+    if finish == "foil" and cardmarket_foil_is_phantom_for_card(conn, card):
+        return unavailable_finish_price_json("foil", "cardmarket-no-stock")
+    return None
+
+
 def card_summary(conn: sqlite3.Connection, card: dict[str, Any], finish: str = "nonfoil") -> dict[str, Any]:
     owned_by_finish = collection_quantities_for_card(conn, card["id"])
-    available_finishes = available_finishes_for_card(card, extra_finishes=owned_by_finish.keys())
+    available_finishes = display_finishes_for_card(card, extra_finishes=owned_by_finish.keys())
     display_finish = finish
     if available_finishes and finish not in available_finishes:
         display_finish = available_finishes[0]
-    price = display_price_for(conn, card, display_finish)
+    price = display_price_for_finish(conn, card, display_finish)
+    if price is None and display_finish == "foil" and cardmarket_foil_is_phantom_for_card(conn, card):
+        price_json = unavailable_finish_price_json("foil", "cardmarket-no-stock")
+    else:
+        price_json = price_to_json(price)
     prices_by_finish: dict[str, dict[str, Any] | None] = {}
     for card_finish in available_finishes:
-        prices_by_finish[card_finish] = price_to_json(display_price_for(conn, card, card_finish))
+        prices_by_finish[card_finish] = finish_price_payload(conn, card, card_finish)
     cached_image = local_image_url(card["id"])
     return {
         "id": card["id"],
@@ -726,20 +990,24 @@ def card_summary(conn: sqlite3.Connection, card: dict[str, Any], finish: str = "
         "image_url": cached_image or image_url_for(card),
         "image_large_url": cached_image or large_image_url_for(card),
         "scryfall_uri": card.get("scryfall_uri"),
-        "price": price_to_json(price),
+        "price": price_json,
+        "foil_availability": foil_availability_for_card(conn, card),
     }
 
 
 def price_to_json(price: PricePoint | None) -> dict[str, Any] | None:
     if price is None:
         return None
-    return {
+    payload: dict[str, Any] = {
         "currency": price.currency,
         "finish": price.finish,
         "price": decimal_to_json(price.price),
         "source": price.source,
         "is_fallback": price.is_fallback,
     }
+    if price.source == FINISH_DUPLICATED_SOURCE:
+        payload["duplicate_from_finish"] = "nonfoil"
+    return payload
 
 
 def add_collection_item(
@@ -955,30 +1223,36 @@ def list_collection(conn: sqlite3.Connection) -> dict[str, Any]:
 
 
 def price_history(conn: sqlite3.Connection, scryfall_id: str, finish: str) -> list[dict[str, Any]]:
-    chart_sources = tuple(meta["source"] for meta in CHART_PRICE_SOURCES.values())
-    legacy_sources = chart_sources + ("scryfall-cardmarket", "mtgjson-cardmarket")
-    placeholders = ",".join("?" for _ in legacy_sources)
-    snapshots_table = catalog_table("price_snapshots")
-    rows = conn.execute(
-        f"""
-        SELECT currency, finish, price, source, snapshot_date, collected_at
-        FROM {snapshots_table}
-        WHERE scryfall_id = ? AND finish = ? AND source IN ({placeholders})
-        ORDER BY snapshot_date ASC, collected_at ASC
-        """,
-        (scryfall_id, finish, *legacy_sources),
-    ).fetchall()
-    snapshot_points = [
-        {
-            "currency": row["currency"],
-            "finish": row["finish"],
-            "price": row["price"],
-            "source": row["source"],
-            "snapshot_date": row["snapshot_date"],
-            "collected_at": row["collected_at"],
-        }
-        for row in rows
-    ]
+    from .price_daily import daily_snapshot_history_points, legacy_cardmarket_history_points, reads_price_daily
+
+    if reads_price_daily(conn):
+        snapshot_points = daily_snapshot_history_points(conn, scryfall_id, finish)
+        snapshot_points.extend(legacy_cardmarket_history_points(conn, scryfall_id, finish))
+    else:
+        chart_sources = tuple(meta["source"] for meta in CHART_PRICE_SOURCES.values())
+        legacy_sources = chart_sources + ("scryfall-cardmarket", "mtgjson-cardmarket")
+        placeholders = ",".join("?" for _ in legacy_sources)
+        snapshots_table = catalog_table("price_snapshots")
+        rows = conn.execute(
+            f"""
+            SELECT currency, finish, price, source, snapshot_date, collected_at
+            FROM {snapshots_table}
+            WHERE scryfall_id = ? AND finish = ? AND source IN ({placeholders})
+            ORDER BY snapshot_date ASC, collected_at ASC
+            """,
+            (scryfall_id, finish, *legacy_sources),
+        ).fetchall()
+        snapshot_points = [
+            {
+                "currency": row["currency"],
+                "finish": row["finish"],
+                "price": row["price"],
+                "source": row["source"],
+                "snapshot_date": row["snapshot_date"],
+                "collected_at": row["collected_at"],
+            }
+            for row in rows
+        ]
     guide_points = cardmarket_guide_history_points(conn, scryfall_id, finish)
     for point in snapshot_points:
         if point["source"] == CARDMARKET_LEGACY_SOURCE:
@@ -1529,6 +1803,123 @@ def cardmarket_guide_bulk_history_points(
     return points
 
 
+def resolve_cardmarket_scryfall_id(conn: sqlite3.Connection, card: dict[str, Any]) -> str:
+    scryfall_id = str(card["id"])
+    if cardmarket_product_id_by_scryfall(conn, [scryfall_id]).get(scryfall_id):
+        return scryfall_id
+    set_code = str(card.get("set") or "").lower()
+    collector_number = str(card.get("collector_number") or "").strip()
+    if not set_code or not collector_number:
+        return scryfall_id
+    cards_table = catalog_table("cards")
+    row = conn.execute(
+        f"""
+        SELECT scryfall_id
+        FROM {cards_table}
+        WHERE lower(set_code) = ? AND collector_number = ?
+          AND json_extract(raw_json, '$.lang') = 'en'
+        LIMIT 1
+        """,
+        (set_code, collector_number),
+    ).fetchone()
+    if row is None:
+        return scryfall_id
+    return str(row["scryfall_id"])
+
+
+def _cardmarket_row_float(row: sqlite3.Row | dict[str, Any], column: str) -> float | None:
+    raw = row[column] if isinstance(row, dict) else row[column]
+    if raw in (None, ""):
+        return None
+    try:
+        parsed = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def cardmarket_foil_row_is_phantom(row: sqlite3.Row | dict[str, Any]) -> bool:
+    """Trend/avg CM foil sans low ni avg = stock nul, donnees figees."""
+    if _cardmarket_row_float(row, "low_foil") is not None:
+        return False
+    if _cardmarket_row_float(row, "avg_foil") is not None:
+        return False
+    return any(
+        _cardmarket_row_float(row, column) is not None
+        for column in ("trend_foil", "avg1_foil", "avg7_foil", "avg30_foil")
+    )
+
+
+def _cardmarket_foil_metrics_from_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, float | None] | None:
+    if cardmarket_foil_row_is_phantom(row):
+        return None
+    return cardmarket_guide_row_metrics(row, "foil")
+
+
+def latest_cardmarket_guide_row_for_card(
+    conn: sqlite3.Connection,
+    card: dict[str, Any],
+) -> sqlite3.Row | None:
+    scryfall_id = resolve_cardmarket_scryfall_id(conn, card)
+    map_table = catalog_table("cardmarket_product_map")
+    guide_table = catalog_table("cardmarket_price_guide_daily")
+    return conn.execute(
+        f"""
+        SELECT g.*, m.id_product
+        FROM {guide_table} g
+        INNER JOIN {map_table} m ON m.id_product = g.id_product
+        WHERE m.scryfall_id = ?
+        ORDER BY g.snapshot_date DESC, g.collected_at DESC
+        LIMIT 1
+        """,
+        (scryfall_id,),
+    ).fetchone()
+
+
+def cardmarket_foil_is_phantom_for_card(conn: sqlite3.Connection, card: dict[str, Any]) -> bool:
+    row = latest_cardmarket_guide_row_for_card(conn, card)
+    if row is None:
+        return False
+    return cardmarket_foil_row_is_phantom(row)
+
+
+def foil_availability_for_card(conn: sqlite3.Connection, card: dict[str, Any]) -> dict[str, str]:
+    if pure_scryfall_price_for(conn, card, "foil") is not None:
+        return {"status": "available", "reason": "scryfall"}
+    if cardmarket_foil_is_phantom_for_card(conn, card):
+        return {"status": "unavailable", "reason": "cardmarket-no-stock"}
+    row = latest_cardmarket_guide_row_for_card(conn, card)
+    if row is not None and _cardmarket_foil_metrics_from_row(row) is not None:
+        return {"status": "available", "reason": "cardmarket"}
+    if card_declares_finish(card, "foil"):
+        return {"status": "unknown", "reason": "scryfall-declared"}
+    return {"status": "unknown", "reason": "no-signal"}
+
+
+def cardmarket_product_insights(
+    conn: sqlite3.Connection,
+    card: dict[str, Any],
+) -> dict[str, Any] | None:
+    scryfall_id = resolve_cardmarket_scryfall_id(conn, card)
+    row = latest_cardmarket_guide_row_for_card(conn, card)
+    if row is None:
+        return None
+    nonfoil_metrics = cardmarket_guide_row_metrics(row, "nonfoil")
+    if not any(value is not None and value > 0 for value in nonfoil_metrics.values()):
+        return None
+    foil_metrics = _cardmarket_foil_metrics_from_row(row)
+    foil_phantom = cardmarket_foil_row_is_phantom(row)
+    return {
+        "id_product": int(row["id_product"]),
+        "snapshot_date": row["snapshot_date"],
+        "collected_at": row["collected_at"],
+        "mapped_scryfall_id": scryfall_id,
+        "nonfoil": nonfoil_metrics,
+        "foil": foil_metrics,
+        "foil_status": "unavailable" if foil_phantom else ("available" if foil_metrics else "unknown"),
+    }
+
+
 def cardmarket_latest_guide_for_card(
     conn: sqlite3.Connection,
     scryfall_id: str,
@@ -1553,6 +1944,8 @@ def cardmarket_latest_guide_for_card(
     ).fetchone()
     if row is None:
         return None
+    if finish == "foil" and cardmarket_foil_row_is_phantom(row):
+        return None
     metrics = cardmarket_guide_row_metrics(row, finish)
     return {
         "id_product": int(row["id_product"]),
@@ -1574,6 +1967,10 @@ def batch_cardmarket_latest_guide(
     chart_column = columns["chart"]
     map_table = catalog_table("cardmarket_product_map")
     guide_table = catalog_table("cardmarket_price_guide_daily")
+    latest_date_row = conn.execute(f"SELECT MAX(snapshot_date) FROM {guide_table}").fetchone()
+    if latest_date_row is None or not latest_date_row[0]:
+        return {}
+    latest_date = latest_date_row[0]
     stats: dict[str, dict[str, Any]] = {}
     chunk_size = 400
     for index in range(0, len(scryfall_ids), chunk_size):
@@ -1582,20 +1979,15 @@ def batch_cardmarket_latest_guide(
         rows = conn.execute(
             f"""
             SELECT m.scryfall_id, g.*, m.id_product
-            FROM {guide_table} g
-            INNER JOIN {map_table} m ON m.id_product = g.id_product
-            INNER JOIN (
-                SELECT m2.scryfall_id, MAX(g2.snapshot_date) AS snapshot_date
-                FROM {guide_table} g2
-                INNER JOIN {map_table} m2 ON m2.id_product = g2.id_product
-                WHERE m2.scryfall_id IN ({placeholders})
-                  AND g2.{chart_column} IS NOT NULL
-                  AND g2.{chart_column} > 0
-                GROUP BY m2.scryfall_id
-            ) latest ON latest.scryfall_id = m.scryfall_id AND latest.snapshot_date = g.snapshot_date
+            FROM {map_table} m
+            INNER JOIN {guide_table} g
+                    ON g.id_product = m.id_product
+                   AND g.snapshot_date = ?
             WHERE m.scryfall_id IN ({placeholders})
+              AND g.{chart_column} IS NOT NULL
+              AND g.{chart_column} > 0
             """,
-            (*chunk, *chunk),
+            (latest_date, *chunk),
         ).fetchall()
         for row in rows:
             stats[row["scryfall_id"]] = {

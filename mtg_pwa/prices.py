@@ -35,6 +35,8 @@ VALID_FINISHES = {"nonfoil", "foil", "etched"}
 
 FINISH_ORDER = ("nonfoil", "foil", "etched")
 
+FINISH_DUPLICATED_SOURCE = "scryfall-cardmarket-finish-duplicated"
+
 
 def available_finishes_for_card(
     card: dict[str, Any],
@@ -60,6 +62,21 @@ def available_finishes_for_card(
     if not finishes:
         return ["nonfoil"]
     return sorted(finishes, key=lambda finish: FINISH_ORDER.index(finish) if finish in FINISH_ORDER else len(FINISH_ORDER))
+
+
+def display_finishes_for_card(
+    card: dict[str, Any],
+    *,
+    extra_finishes: Iterable[str] | None = None,
+) -> list[str]:
+    """Finitions UI : toujours foil, plus les finitions reelles de la carte."""
+    finishes = available_finishes_for_card(card, extra_finishes=extra_finishes)
+    if "foil" not in finishes:
+        finishes = sorted(
+            [*finishes, "foil"],
+            key=lambda finish: FINISH_ORDER.index(finish) if finish in FINISH_ORDER else len(FINISH_ORDER),
+        )
+    return finishes
 
 
 def extract_eur_prices(card: dict[str, Any]) -> dict[str, Decimal]:
@@ -103,21 +120,6 @@ CHART_PRICE_SOURCES: dict[str, dict[str, str]] = {
         "source": "cardmarket-guide",
         "currency": "EUR",
         "label": "Cardmarket",
-    },
-    "cardkingdom": {
-        "source": "mtgjson-cardkingdom",
-        "currency": "USD",
-        "label": "Card Kingdom",
-    },
-    "manapool": {
-        "source": "mtgjson-manapool",
-        "currency": "USD",
-        "label": "ManaPool",
-    },
-    "tcgplayer": {
-        "source": "mtgjson-tcgplayer",
-        "currency": "USD",
-        "label": "TCGPlayer",
     },
 }
 
