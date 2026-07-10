@@ -26,9 +26,9 @@ Guide pour agents Cursor travaillant sur ce dépôt.
 
 ## Phase active
 
-- **Semver :** `1.1.0` (phase 1.1 post-MEP)
-- **MEP livrée :** `1.0.0` (2026-06-30)
-- Journal : `docs/traceability/changelog/DEV_LOG_1_1.md`
+- **Semver :** `2.0.0` (phase 2.0 post-MEP)
+- **MEP livrée :** `2.0.0` (2026-07-10) · précédente `1.0.0` (2026-06-30)
+- Journal : `docs/traceability/changelog/DEV_LOG_2_0.md`
 
 ### DEV_LOG
 
